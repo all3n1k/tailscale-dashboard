@@ -1376,7 +1376,7 @@ const LIBRARY = [
     cmd:{ win:'powershell -command "Get-ComputerInfo | Select WindowsProductName,OsVersion,CsName | Format-List"',
           mac:'sw_vers', lin:'hostnamectl' } },
   { cat:'System', label:'Last Reboots', icon:'🔄', desc:'When the machine last restarted',
-    cmd:{ win:'powershell -command "Get-WinEvent -FilterHashtable @{LogName=\'System\'; Id=6005} -MaxEvents 5 | Select TimeCreated,Message | Format-List"',
+    cmd:{ win:'powershell -command "Get-WinEvent -FilterHashtable @{LogName="System"; Id=6005} -MaxEvents 5 | Select TimeCreated,Message | Format-List"',
           mac:'last reboot | head -5', lin:'last reboot | head -5' } },
   { cat:'System', label:'Logged In Users', icon:'👤', desc:'Who is currently logged in',
     cmd:{ win:'query user', mac:'who', lin:'who' } },
@@ -1426,7 +1426,7 @@ const LIBRARY = [
   { cat:'Processes', label:'Process Count', icon:'#️⃣', desc:'Total number of running processes',
     cmd:{ win:'powershell -command "(Get-Process).Count"', mac:'ps aux | wc -l', lin:'ps aux | wc -l' } },
   { cat:'Processes', label:'Find Process by Name', icon:'🔍', desc:'Search for a running process (edit name)',
-    cmd:{ win:'powershell -command "Get-Process | Where Name -like \'*chrome*\' | Select Name,CPU,Id | ft -auto"',
+    cmd:{ win:'powershell -command "Get-Process | Where Name -like "*chrome*" | Select Name,CPU,Id | ft -auto"',
           mac:'pgrep -l chrome', lin:'pgrep -l chrome' } },
 
   // ── Services ─────────────────────────────────────────────────────────────────
@@ -1446,8 +1446,8 @@ const LIBRARY = [
           mac:'diskutil list', lin:'lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT' } },
   { cat:'Storage', label:'Largest Files (C:)', icon:'🗂', desc:'Top 10 largest files on the system drive',
     cmd:{ win:'powershell -command "Get-ChildItem C:\\ -Recurse -ErrorAction SilentlyContinue | Sort Length -Desc | Select -First 10 FullName,@{N="MB";E={[math]::round($_.Length/1MB,1)}} | Format-Table -AutoSize"' } },
-  { cat:'Storage', label:'Top-Level Folder Sizes', icon:'📁', desc:'Size of each folder in C:\\',
-    cmd:{ win:'powershell -command "Get-ChildItem C:\\ -Directory -ErrorAction SilentlyContinue | ForEach-Object { $s=(Get-ChildItem $_.FullName -Recurse -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum; [PSCustomObject]@{Folder=$_.Name;\'GB\'=[math]::round($s/1GB,2)} } | Sort GB -Desc | ft -auto"',
+  { cat:'Storage', label:'Top-Level Folder Sizes', icon:'📁', desc:'Size of each top-level folder in C:',
+    cmd:{ win:'powershell -command "Get-ChildItem C:\\ -Directory -ErrorAction SilentlyContinue | ForEach-Object { $s=(Get-ChildItem $_.FullName -Recurse -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum; [PSCustomObject]@{Folder=$_.Name; GB=[math]::round($s/1GB,2)} } | Sort GB -Desc | ft -auto"',
           mac:'du -sh /* 2>/dev/null | sort -rh | head -15', lin:'du -sh /* 2>/dev/null | sort -rh | head -15' } },
 
   // ── Diagnostics ──────────────────────────────────────────────────────────────
@@ -1462,7 +1462,7 @@ const LIBRARY = [
   { cat:'Diagnostics', label:'Windows Defender Status', icon:'🦠', desc:'AV definitions and scan status',
     cmd:{ win:'powershell -command "Get-MpComputerStatus | Select AMRunningMode,AntivirusEnabled,AntispywareEnabled,@{N="DefUpdated";E={$_.AntivirusSignatureLastUpdated}} | fl"' } },
   { cat:'Diagnostics', label:'System Errors (24h)', icon:'📋', desc:'All errors logged in the last 24 hours',
-    cmd:{ win:'powershell -command "Get-WinEvent -FilterHashtable @{LogName=\'System\';Level=2;StartTime=(Get-Date).AddHours(-24)} -MaxEvents 20 -ErrorAction SilentlyContinue | Select TimeCreated,ProviderName,Message | fl"' } },
+    cmd:{ win:'powershell -command "Get-WinEvent -FilterHashtable @{LogName="System";Level=2;StartTime=(Get-Date).AddHours(-24)} -MaxEvents 20 -ErrorAction SilentlyContinue | Select TimeCreated,ProviderName,Message | fl"' } },
 ];
 
 const _CATS = ['All', ...new Set(LIBRARY.map(c => c.cat))];
@@ -1505,7 +1505,7 @@ function closeGuide() {
 function buildGuideCats() {
   const el = document.getElementById('guide-cats');
   el.innerHTML = _CATS.map(c =>
-    '<button class="guide-cat-btn' + (c === _selectedCat ? ' active' : '') + '" onclick="selectGuideCat(\'' + c + '\')">' + c + '</button>'
+    '<button class="guide-cat-btn' + (c === _selectedCat ? ' active' : '') + '" onclick="selectGuideCat(\\x27' + c + '\\x27)">' + c + '</button>'
   ).join('');
 }
 
