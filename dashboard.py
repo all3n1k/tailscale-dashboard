@@ -204,13 +204,9 @@ SSH_DEFAULT_USER = "neo"
 
 # MAC addresses for Wake-on-LAN (add more as devices are discovered)
 DEVICE_MACS = {
-    "neo-mac":           "c0:c7:db:a5:16:8d",
-    "serverbox":         "6c:3c:8c:03:56:41",
-    "optiserver":        "74:e5:f9:68:82:f6",
-    "michellepc":        "98:48:27:e3:53:c8",
-    "a-pad":             "70:9c:d1:60:84:61",
-    "galaxy-tab-a7-lite":"b6:f7:12:c4:06:1c",
-    # digitalstorm and neo: MACs unknown (were offline during scan)
+    # Add MAC addresses here to enable Wake-on-LAN for each device.
+    # Find MACs with: arp -a (after pinging the device), or check router DHCP table.
+    # Example: "my-desktop": "aa:bb:cc:dd:ee:ff",
 }
 
 OS_ICONS = {

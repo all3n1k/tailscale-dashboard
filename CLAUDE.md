@@ -15,7 +15,7 @@ Secondary component: an MCP stdio server (`mcp_server.py`) that exposes Tailscal
 ## File Structure
 
 ```
-/Users/neo/tailscale-dashboard/
+/path/to/tailscale-dashboard/
 ├── dashboard.py       # Everything: Flask app, API, WebSocket SSH, HTML/CSS/JS (monolith)
 ├── mcp_server.py      # MCP stdio server — tailnet tools for Claude
 ├── dashboard.log      # Server stdout/stderr (nohup output)
@@ -34,13 +34,13 @@ No requirements.txt — deps are: `flask`, `flask-sock`. Install with pip if mis
 ```bash
 # Start (background, survives terminal close)
 pkill -f "dashboard.py" 2>/dev/null; sleep 1
-nohup python3 /Users/neo/tailscale-dashboard/dashboard.py > /Users/neo/tailscale-dashboard/dashboard.log 2>&1 &
+nohup python3 /path/to/tailscale-dashboard/dashboard.py > /path/to/tailscale-dashboard/dashboard.log 2>&1 &
 
 # Verify
 curl -s http://localhost:5555/api/status | python3 -m json.tool | head -20
 
 # Check logs
-tail -f /Users/neo/tailscale-dashboard/dashboard.log
+tail -f /path/to/tailscale-dashboard/dashboard.log
 
 # Stop
 pkill -f "dashboard.py"
@@ -54,13 +54,13 @@ Port is controlled by `PORT` env var (default 5555).
 
 | Hostname | Label | Tailscale IP | OS | SSH User | SSH Port | Category |
 |---|---|---|---|---|---|---|
-| neo-mac | MacBook Air | (self) | macOS | neo | 22 | laptop |
-| digitalstorm | Digital Storm Workstation | varies | windows | ALLEN | 22 | desktop |
-| neo | Neo Laptop | 100.121.253.75 | windows | allen | 22 | laptop |
-| michellepc | Michelle's PC | 100.69.0.43 | windows | michelle | 22 | desktop |
-| a-pad | A-Pad | 100.125.84.119 | windows | allen | 22 | laptop |
-| galaxy-tab-a7-lite | Galaxy Tab | 100.82.118.70 | android | neo | **8022** | tablet |
-| allens-iphone | Allen's iPhone | varies | iOS | — | — | mobile |
+| neo-mac | MacBook Air | (self) | macOS | [user] | 22 | laptop |
+| digitalstorm | Digital Storm Workstation | varies | windows | [user] | 22 | desktop |
+| neo | Neo Laptop | 100.x.x.x | windows | [user] | 22 | laptop |
+| michellepc | Household PC | 100.x.x.x | windows | [user] | 22 | desktop |
+| a-pad | A-Pad | 100.x.x.x | windows | [user] | 22 | laptop |
+| galaxy-tab-a7-lite | Galaxy Tab | 100.x.x.x | android | [user] | **8022** | tablet |
+| allens-iphone | iPhone | varies | iOS | — | — | mobile |
 | iphone-se-gen-2 | iPhone SE | varies | iOS | — | — | mobile |
 | iphone172 | iPhone 7 | varies | iOS | — | — | mobile |
 
@@ -174,7 +174,7 @@ setInterval(refresh, 15000);  // polls every 15 seconds
 
 Stdio MCP server. Register with:
 ```
-claude mcp add --transport stdio tailnet-ssh -- python3 /Users/neo/tailscale-dashboard/mcp_server.py
+claude mcp add --transport stdio tailnet-ssh -- python3 /path/to/tailscale-dashboard/mcp_server.py
 ```
 
 **Important**: This is a long-running process. Code changes only take effect after restarting it (`claude` CLI restart or kill the process).
@@ -186,18 +186,7 @@ claude mcp add --transport stdio tailnet-ssh -- python3 /Users/neo/tailscale-das
 
 **Tailscale cache**: Same TTL-3s pattern as dashboard.py.
 
-**SSH_USERS in mcp_server.py**: Must be kept in sync with dashboard.py manually. Current values:
-```python
-SSH_USERS = {
-    "neo-mac":      "neo",
-    "digitalstorm": "ALLEN",
-    "neo":          "allen",
-    "michellepc":   "michelle",
-    "a-pad":        "allen",
-}
-SSH_DEFAULT_USER = "neo"
-SSH_TIMEOUT = 30
-```
+**SSH_USERS in mcp_server.py**: Must be kept in sync with dashboard.py manually. Map each hostname to its SSH username.
 
 Note: mcp_server.py does NOT have SSH_PORTS — it uses port 22 for all hosts. The Galaxy Tab isn't reachable via `tailnet_run` without adding port support.
 

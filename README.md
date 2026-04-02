@@ -2,7 +2,7 @@
 
 A self-hosted web dashboard for monitoring and controlling a personal Tailscale mesh network. Runs as a single-file Flask server — no build step, no database, no container required.
 
-Live at `http://localhost:5555` on `neo-mac` (the always-on MacBook Air hub).
+Live at `http://localhost:5555` on the always-on hub machine.
 
 ---
 
@@ -22,28 +22,19 @@ Live at `http://localhost:5555` on `neo-mac` (the always-on MacBook Air hub).
 
 ## Network Topology
 
+Configure your devices in `dashboard.py` by editing `DEVICE_INFO`, `SSH_USERS`, `SSH_PORTS`, and `DEVICE_MACS`. Example layout:
+
 | Hostname | Label | OS | SSH User | SSH Port | Category |
 |---|---|---|---|---|---|
-| neo-mac | MacBook Air | macOS | neo | 22 | laptop |
-| digitalstorm | Digital Storm Workstation | Windows | ALLEN | 22 | desktop |
-| neo | Neo Laptop | Windows | allen | 22 | laptop |
-| michellepc | Michelle's PC | Windows | michelle | 22 | desktop |
-| a-pad | A-Pad | Windows | allen | 22 | laptop |
-| galaxy-tab-a7-lite | Galaxy Tab | Android | neo | 8022 | tablet |
-| serverbox | Server Box | Windows | dev303 | 22 | desktop |
-| optiserver | Opti Server | Windows | subst | 22 | desktop |
+| my-mac | MacBook Air | macOS | alice | 22 | laptop |
+| desktop-1 | Gaming PC | Windows | alice | 22 | desktop |
+| desktop-2 | Office PC | Windows | bob | 22 | desktop |
+| android-tab | Galaxy Tab | Android | user | 8022 | tablet |
+| server-1 | Home Server | Windows | admin | 22 | desktop |
 
 ## Hardware Specs
 
-| Machine | CPU | GPU | RAM |
-|---|---|---|---|
-| neo-mac | Apple M-series | — | — |
-| digitalstorm | Intel i9-12900K | RTX 3090 24GB | — (offline during scan) |
-| neo | Intel i7-12800H | RTX 3080 Ti 16GB | 32GB |
-| michellepc | Intel i7-9700K | GTX 1660 Super | 32GB |
-| serverbox | Intel i5-12500T | Intel UHD 770 | 16GB |
-| optiserver | Intel i5-12500T | Intel UHD 770 | 16GB |
-| a-pad | Intel Celeron N4120 | Intel UHD 600 | 8GB |
+Add your machine specs to `DEVICE_INFO[hostname]["specs"]` in `dashboard.py`. These appear on each device card.
 
 ---
 
@@ -82,8 +73,8 @@ PORT=8080 python3 dashboard.py  # custom port
 **Background (survives terminal close):**
 ```bash
 pkill -f "dashboard.py" 2>/dev/null; sleep 1
-nohup python3 /Users/neo/tailscale-dashboard/dashboard.py \
-  > /Users/neo/tailscale-dashboard/dashboard.log 2>&1 &
+nohup python3 /path/to/tailscale-dashboard/dashboard.py \
+  > /path/to/tailscale-dashboard/dashboard.log 2>&1 &
 ```
 
 ---
@@ -114,10 +105,29 @@ cmd /c "icacls C:\ProgramData\ssh\administrators_authorized_keys /grant Administ
 ~/.ssh/authorized_keys   # standard path, chmod 600
 ```
 
-### Android (Galaxy Tab via Termux)
+### Android (Termux)
 ```bash
 ~/.ssh/authorized_keys   # Termux home
 # sshd runs on port 8022 — start with: sshd
+```
+
+---
+
+## Wake-on-LAN Setup
+
+Add MAC addresses to `DEVICE_MACS` in `dashboard.py` to enable the WoL button per device:
+
+```python
+DEVICE_MACS = {
+    "my-desktop": "aa:bb:cc:dd:ee:ff",
+    "server-1":   "11:22:33:44:55:66",
+}
+```
+
+Find a MAC address after pinging the device:
+```bash
+arp -a         # macOS / Linux
+arp -a         # Windows (cmd)
 ```
 
 ---
@@ -196,11 +206,11 @@ function cardHash(d) {
 ### `/api/status` response shape (per device)
 ```json
 {
-  "hostname": "neo",
-  "label": "Neo Laptop",
-  "specs": "i7-12800H · RTX 3080 Ti · 32GB · Windows",
+  "hostname": "my-laptop",
+  "label": "My Laptop",
+  "specs": "i7 · RTX 3080 · 32GB · Windows",
   "category": "laptop",
-  "ip": "100.121.253.75",
+  "ip": "100.x.x.x",
   "os": "windows",
   "online": true,
   "is_self": false,
@@ -211,7 +221,7 @@ function cardHash(d) {
   "tx_bytes": "456.7MB",
   "last_seen": "just now",
   "last_handshake": "2m ago",
-  "ssh_user": "allen",
+  "ssh_user": "alice",
   "ssh_port": 22,
   "has_ssh": true,
   "has_power": true,
@@ -228,7 +238,7 @@ Exposes the tailnet as callable tools for Claude.
 
 **Register:**
 ```bash
-claude mcp add --transport stdio tailnet-ssh -- python3 /Users/neo/tailscale-dashboard/mcp_server.py
+claude mcp add --transport stdio tailnet-ssh -- python3 /path/to/tailscale-dashboard/mcp_server.py
 ```
 
 **Tools:**
@@ -237,7 +247,7 @@ claude mcp add --transport stdio tailnet-ssh -- python3 /Users/neo/tailscale-das
 |---|---|
 | `tailnet_list_devices` | List all devices with status, IP, OS, relay |
 | `tailnet_run` | SSH into a peer and run a command (30s timeout) |
-| `tailnet_run_local` | Run a command locally on neo-mac |
+| `tailnet_run_local` | Run a command locally on the hub machine |
 
 > Changes to `mcp_server.py` only take effect after restarting the Claude CLI or killing the process.
 
@@ -245,9 +255,7 @@ claude mcp add --transport stdio tailnet-ssh -- python3 /Users/neo/tailscale-das
 
 ## Known Gaps
 
-- **digitalstorm specs**: Was offline during hardware scan — specs are estimates. Run CIM queries when online.
-- **digitalstorm + neo MACs**: Were offline during ARP scan — WoL not available until MACs are added to `DEVICE_MACS` in `dashboard.py`.
-- **mcp_server.py SSH ports**: `tailnet_run` always uses port 22 — Galaxy Tab (port 8022) unreachable without adding `SSH_PORTS` dict.
+- **mcp_server.py SSH ports**: `tailnet_run` always uses port 22 — non-standard ports (e.g. Termux on 8022) unreachable without adding `SSH_PORTS` dict.
 - **dashboard.py modularization**: Still a monolith. Natural split: `config.py`, `routes/`, `templates/`, `mirroir_client.py`.
 
 ---
@@ -260,6 +268,6 @@ claude mcp add --transport stdio tailnet-ssh -- python3 /Users/neo/tailscale-das
 | paramiko (Windows) | No PTY available on Windows; paramiko is pure Python and handles the same WebSocket protocol |
 | Tailscale status cache (3s TTL) | Prevents redundant `tailscale status --json` CLI spawns on concurrent requests |
 | Soft refresh via `data-hash` | Prevents input focus loss and visual flash on every 15s poll |
-| nohup background process | Cursor's F5 debug launch was unreliable for persistence across edits |
+| nohup background process | Keeps server alive across editor restarts and terminal closes |
 | `cmd /c icacls` for Windows ACLs | PowerShell's `/` flag parsing breaks `icacls` — must run through `cmd.exe` |
 | Fire-and-forget SSH for power | SSH connection dies when machine shuts down; `Popen` avoids a hung request |
