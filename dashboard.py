@@ -1168,6 +1168,7 @@ function cardHTML(d) {
 
 // ── Polling ────────────────────────────────────────────────────────────────
 let _knownHostnames = [];
+let _devices = [];
 
 async function refresh() {
   const grid = document.getElementById('grid');
@@ -1196,6 +1197,9 @@ async function refresh() {
       }
       return;
     }
+
+    _devices = d.devices;
+    refreshGuideSelect();
 
     const newHostnames = d.devices.map(dev => dev.hostname);
 
@@ -1353,53 +1357,6 @@ setInterval(refresh, 15000);
 
 // ── Command Library ──────────────────────────────────────────────────────────
 
-let _devices = [];
-const _origRefresh = refresh;
-
-// Patch refresh to keep _devices in sync
-const _patchedRefresh = async function() {
-  const grid = document.getElementById('grid');
-  let d;
-  try { const r = await fetch('/api/status'); d = await r.json(); } catch(e) {
-    if (!grid.children.length || grid.querySelector('.loading'))
-      grid.innerHTML = '<div class="loading" style="color:var(--red)">Fetch failed: ' + e.message + '</div>';
-    return;
-  }
-  if (d.devices) _devices = d.devices;
-  // Delegate to original rendering logic by re-using the shared fetch result
-  try {
-    document.getElementById('tailnet-id').textContent = d.tailnet;
-    document.getElementById('updated').textContent    = 'Updated ' + new Date(d.updated).toLocaleTimeString();
-    document.getElementById('s-total').textContent    = d.total;
-    document.getElementById('s-online').textContent   = d.online;
-    document.getElementById('s-offline').textContent  = d.offline;
-    document.getElementById('s-latency').textContent  = d.avg_latency != null ? d.avg_latency + 'ms' : '—';
-    if (!d.devices || !d.devices.length) return;
-    const newHostnames = d.devices.map(dev => dev.hostname);
-    const listChanged  = newHostnames.join('\\0') !== _knownHostnames.join('\\0');
-    if (listChanged || grid.querySelector('.loading')) {
-      grid.innerHTML = d.devices.map(cardHTML).join('');
-      _knownHostnames = newHostnames;
-    } else {
-      d.devices.forEach(dev => {
-        const hash = cardHash(dev);
-        const el   = document.getElementById('card-' + dev.hostname);
-        if (el && el.dataset.hash !== hash) {
-          const tmp = document.createElement('div');
-          tmp.innerHTML = cardHTML(dev);
-          el.replaceWith(tmp.firstElementChild);
-        }
-      });
-    }
-    refreshGuideSelect();
-  } catch(e) { console.error(e); }
-};
-
-// Replace the global refresh
-// (We already defined the original; override via reassignment trick)
-window.refresh = _patchedRefresh;
-setTimeout(() => window.refresh(), 0);
-
 // Command definitions
 // cmd: string = all OS; object {win, mac, lin} = OS-specific
 const LIBRARY = [
@@ -1407,10 +1364,10 @@ const LIBRARY = [
   { cat:'System', label:'Uptime', icon:'⏱', desc:'How long the machine has been running',
     cmd:{ win:'net statistics server | findstr /C:"since"', mac:'uptime', lin:'uptime -p' } },
   { cat:'System', label:'Memory Usage', icon:'🧠', desc:'RAM used vs total',
-    cmd:{ win:'powershell -command "Get-CimInstance Win32_OperatingSystem | Select @{N=\'Used GB\';E={[math]::round(($_.TotalVisibleMemorySize-$_.FreePhysicalMemory)/1MB,2)}},@{N=\'Total GB\';E={[math]::round($_.TotalVisibleMemorySize/1MB,2)}} | Format-List"',
+    cmd:{ win:'powershell -command "Get-CimInstance Win32_OperatingSystem | Select @{N="Used GB";E={[math]::round(($_.TotalVisibleMemorySize-$_.FreePhysicalMemory)/1MB,2)}},@{N="Total GB";E={[math]::round($_.TotalVisibleMemorySize/1MB,2)}} | Format-List"',
           mac:'vm_stat | head -8', lin:'free -h' } },
   { cat:'System', label:'Disk Usage', icon:'💾', desc:'Free and used space on all drives',
-    cmd:{ win:'powershell -command "Get-PSDrive -PSProvider FileSystem | Select Name,@{N=\'Used GB\';E={[math]::round($_.Used/1GB,1)}},@{N=\'Free GB\';E={[math]::round($_.Free/1GB,1)}} | Format-Table -AutoSize"',
+    cmd:{ win:'powershell -command "Get-PSDrive -PSProvider FileSystem | Select Name,@{N="Used GB";E={[math]::round($_.Used/1GB,1)}},@{N="Free GB";E={[math]::round($_.Free/1GB,1)}} | Format-Table -AutoSize"',
           mac:'df -h', lin:'df -h' } },
   { cat:'System', label:'CPU Load', icon:'⚡', desc:'Current processor utilization',
     cmd:{ win:'powershell -command "Get-CimInstance Win32_Processor | Select Name,LoadPercentage | Format-List"',
@@ -1464,7 +1421,7 @@ const LIBRARY = [
     cmd:{ win:'powershell -command "Get-Process | Sort CPU -Desc | Select -First 10 Name,CPU,Id | Format-Table -AutoSize"',
           mac:'ps aux | sort -rk 3 | head -11', lin:'ps aux --sort=-%cpu | head -11' } },
   { cat:'Processes', label:'Top RAM (10)', icon:'🧠', desc:'10 processes consuming the most memory',
-    cmd:{ win:'powershell -command "Get-Process | Sort WS -Desc | Select -First 10 Name,@{N=\'MB\';E={[math]::round($_.WS/1MB,1)}},Id | Format-Table -AutoSize"',
+    cmd:{ win:'powershell -command "Get-Process | Sort WS -Desc | Select -First 10 Name,@{N="MB";E={[math]::round($_.WS/1MB,1)}},Id | Format-Table -AutoSize"',
           mac:'ps aux | sort -rk 4 | head -11', lin:'ps aux --sort=-%mem | head -11' } },
   { cat:'Processes', label:'Process Count', icon:'#️⃣', desc:'Total number of running processes',
     cmd:{ win:'powershell -command "(Get-Process).Count"', mac:'ps aux | wc -l', lin:'ps aux | wc -l' } },
@@ -1485,17 +1442,17 @@ const LIBRARY = [
 
   // ── Storage ──────────────────────────────────────────────────────────────────
   { cat:'Storage', label:'Drive List', icon:'💿', desc:'All volumes with size and filesystem type',
-    cmd:{ win:'powershell -command "Get-Volume | Where DriveLetter | Select DriveLetter,FileSystemLabel,@{N=\'Size GB\';E={[math]::round($_.Size/1GB,1)}},@{N=\'Free GB\';E={[math]::round($_.SizeRemaining/1GB,1)}} | Format-Table -AutoSize"',
+    cmd:{ win:'powershell -command "Get-Volume | Where DriveLetter | Select DriveLetter,FileSystemLabel,@{N="Size GB";E={[math]::round($_.Size/1GB,1)}},@{N="Free GB";E={[math]::round($_.SizeRemaining/1GB,1)}} | Format-Table -AutoSize"',
           mac:'diskutil list', lin:'lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT' } },
   { cat:'Storage', label:'Largest Files (C:)', icon:'🗂', desc:'Top 10 largest files on the system drive',
-    cmd:{ win:'powershell -command "Get-ChildItem C:\\ -Recurse -ErrorAction SilentlyContinue | Sort Length -Desc | Select -First 10 FullName,@{N=\'MB\';E={[math]::round($_.Length/1MB,1)}} | Format-Table -AutoSize"' } },
+    cmd:{ win:'powershell -command "Get-ChildItem C:\\ -Recurse -ErrorAction SilentlyContinue | Sort Length -Desc | Select -First 10 FullName,@{N="MB";E={[math]::round($_.Length/1MB,1)}} | Format-Table -AutoSize"' } },
   { cat:'Storage', label:'Top-Level Folder Sizes', icon:'📁', desc:'Size of each folder in C:\\',
     cmd:{ win:'powershell -command "Get-ChildItem C:\\ -Directory -ErrorAction SilentlyContinue | ForEach-Object { $s=(Get-ChildItem $_.FullName -Recurse -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum; [PSCustomObject]@{Folder=$_.Name;\'GB\'=[math]::round($s/1GB,2)} } | Sort GB -Desc | ft -auto"',
           mac:'du -sh /* 2>/dev/null | sort -rh | head -15', lin:'du -sh /* 2>/dev/null | sort -rh | head -15' } },
 
   // ── Diagnostics ──────────────────────────────────────────────────────────────
   { cat:'Diagnostics', label:'Event Log Errors', icon:'🚨', desc:'Recent system errors in the Windows event log',
-    cmd:{ win:'powershell -command "Get-EventLog -LogName System -EntryType Error -Newest 10 | Select TimeGenerated,Source,@{N=\'Msg\';E={$_.Message.Substring(0,[math]::min(80,$_.Message.Length))}} | Format-List"' } },
+    cmd:{ win:'powershell -command "Get-EventLog -LogName System -EntryType Error -Newest 10 | Select TimeGenerated,Source,@{N="Msg";E={$_.Message.Substring(0,[math]::min(80,$_.Message.Length))}} | Format-List"' } },
   { cat:'Diagnostics', label:'Firewall Status', icon:'🛡', desc:'Firewall enabled/disabled state',
     cmd:{ win:'netsh advfirewall show allprofiles state',
           mac:'sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate',
@@ -1503,7 +1460,7 @@ const LIBRARY = [
   { cat:'Diagnostics', label:'Pending Windows Updates', icon:'🔄', desc:'Recently installed hotfixes',
     cmd:{ win:'powershell -command "Get-HotFix | Sort InstalledOn -Desc | Select -First 5 HotFixID,Description,InstalledOn | Format-Table -AutoSize"' } },
   { cat:'Diagnostics', label:'Windows Defender Status', icon:'🦠', desc:'AV definitions and scan status',
-    cmd:{ win:'powershell -command "Get-MpComputerStatus | Select AMRunningMode,AntivirusEnabled,AntispywareEnabled,@{N=\'DefUpdated\';E={$_.AntivirusSignatureLastUpdated}} | fl"' } },
+    cmd:{ win:'powershell -command "Get-MpComputerStatus | Select AMRunningMode,AntivirusEnabled,AntispywareEnabled,@{N="DefUpdated";E={$_.AntivirusSignatureLastUpdated}} | fl"' } },
   { cat:'Diagnostics', label:'System Errors (24h)', icon:'📋', desc:'All errors logged in the last 24 hours',
     cmd:{ win:'powershell -command "Get-WinEvent -FilterHashtable @{LogName=\'System\';Level=2;StartTime=(Get-Date).AddHours(-24)} -MaxEvents 20 -ErrorAction SilentlyContinue | Select TimeCreated,ProviderName,Message | fl"' } },
 ];
