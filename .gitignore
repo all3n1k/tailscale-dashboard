@@ -1,0 +1,9 @@
+dashboard.log
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.env
+venv/
+.venv/
+*.egg-info/
