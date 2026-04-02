@@ -521,6 +521,56 @@ def mirror_action():
     return jsonify({"ok": True, "result": r.get("text", "")})
 
 
+@app.route("/api/run", methods=["POST"])
+def api_run():
+    d        = request.json or {}
+    hostname = d.get("hostname", "").lower()
+    command  = d.get("command", "").strip()
+
+    if not hostname or not command:
+        return jsonify({"error": "hostname and command are required"}), 400
+
+    ts       = _tailscale_status()
+    node_map = {}
+    for node in [ts.get("Self", {})] + list(ts.get("Peer", {}).values()):
+        dns  = node.get("DNSName", "")
+        name = dns.split(".")[0].lower() if dns else node.get("HostName", "").lower()
+        node_map[name] = node
+
+    node = node_map.get(hostname)
+    if not node:
+        return jsonify({"error": f"hostname '{hostname}' not found"}), 404
+
+    ip   = (node.get("TailscaleIPs") or [""])[0]
+    user = SSH_USERS.get(hostname, SSH_DEFAULT_USER)
+    port = SSH_PORTS.get(hostname, 22)
+
+    # Self — run locally
+    if node.get("DNSName", "").split(".")[0].lower() == ts.get("Self", {}).get("DNSName", "").split(".")[0].lower():
+        try:
+            r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+            out = (r.stdout + r.stderr).strip() or f"[exit {r.returncode}]"
+            return jsonify({"output": out})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    try:
+        r = subprocess.run(
+            ["ssh", "-o", "StrictHostKeyChecking=accept-new",
+             "-o", "ConnectTimeout=8", "-o", "IdentitiesOnly=yes",
+             "-o", "BatchMode=yes",
+             "-i", os.path.expanduser("~/.ssh/id_ed25519"),
+             "-p", str(port), f"{user}@{ip}", command],
+            capture_output=True, text=True, timeout=30,
+        )
+        out = (r.stdout + r.stderr).strip() or f"[exit {r.returncode}]"
+        return jsonify({"output": out})
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Command timed out after 30s"}), 504
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/wol", methods=["POST"])
 def api_wol():
     hostname = (request.json or {}).get("hostname", "").lower()
@@ -729,6 +779,84 @@ HTML = """<!DOCTYPE html>
   .mirror-tap-hint { font-size: 0.62rem; color: var(--muted); text-align: center; margin-top: 4px; }
   .mirror-status { font-size: 0.66rem; color: var(--muted); padding: 7px 14px; background: rgba(0,0,0,0.3); border-top: 1px solid var(--border); flex-shrink: 0; display: flex; justify-content: space-between; }
   .auto-refresh-on { color: var(--green) !important; }
+
+  /* ── Command Guide panel ── */
+  .guide-overlay { display:none; position:fixed; inset:0; z-index:1100; background:rgba(0,0,0,0.5); backdrop-filter:blur(4px); }
+  .guide-overlay.open { display:block; }
+  .guide-panel {
+    position:fixed; top:0; right:0; bottom:0; z-index:1200;
+    width: min(480px, 100vw);
+    background: rgba(9,13,22,0.97); backdrop-filter: blur(20px);
+    border-left: 1px solid var(--border2);
+    display:flex; flex-direction:column;
+    transform: translateX(100%);
+    transition: transform 0.35s cubic-bezier(0.165,0.84,0.44,1);
+    box-shadow: -24px 0 80px rgba(0,0,0,0.6);
+  }
+  .guide-panel.open { transform: translateX(0); }
+  .guide-header { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1px solid var(--border); flex-shrink:0; }
+  .guide-header-title { font-size:0.88rem; font-weight:700; letter-spacing:-0.01em; }
+  .guide-header-title span { color:var(--blue); }
+  .guide-close { background:none; border:none; color:var(--muted); cursor:pointer; font-size:1rem; padding:4px 8px; border-radius:6px; transition:all 0.15s; }
+  .guide-close:hover { color:var(--red); background:rgba(239,68,68,0.1); }
+  .guide-search-wrap { padding:12px 16px; border-bottom:1px solid var(--border); flex-shrink:0; }
+  .guide-search {
+    width:100%; background:rgba(255,255,255,0.05); border:1px solid var(--border2);
+    color:var(--text); padding:9px 12px; border-radius:10px; font-size:0.82rem; font-family:inherit;
+  }
+  .guide-search:focus { outline:none; border-color:rgba(58,130,255,0.5); box-shadow:0 0 0 3px rgba(58,130,255,0.1); }
+  .guide-cats { display:flex; gap:6px; padding:10px 16px; overflow-x:auto; flex-shrink:0; border-bottom:1px solid var(--border); scrollbar-width:none; }
+  .guide-cats::-webkit-scrollbar { display:none; }
+  .guide-cat-btn { flex-shrink:0; padding:4px 12px; border-radius:20px; border:1px solid var(--border2); background:rgba(255,255,255,0.04); color:var(--muted); font-size:0.67rem; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; cursor:pointer; transition:all 0.2s; font-family:inherit; white-space:nowrap; }
+  .guide-cat-btn:hover, .guide-cat-btn.active { border-color:var(--blue); color:var(--blue); background:rgba(58,130,255,0.1); }
+  .guide-list { flex:1; overflow-y:auto; padding:12px 16px; display:flex; flex-direction:column; gap:6px; }
+  .guide-list::-webkit-scrollbar { width:4px; }
+  .guide-list::-webkit-scrollbar-track { background:transparent; }
+  .guide-list::-webkit-scrollbar-thumb { background:var(--border2); border-radius:4px; }
+  .guide-cat-label { font-size:0.6rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.1em; font-weight:600; padding:8px 2px 4px; }
+  .guide-cmd {
+    background:rgba(255,255,255,0.03); border:1px solid var(--border); border-radius:12px;
+    padding:12px 14px; cursor:pointer; transition:all 0.2s;
+  }
+  .guide-cmd:hover { border-color:var(--border2); background:rgba(255,255,255,0.06); transform:translateX(2px); }
+  .guide-cmd.selected { border-color:rgba(58,130,255,0.4); background:rgba(58,130,255,0.08); }
+  .guide-cmd-top { display:flex; align-items:center; gap:8px; margin-bottom:4px; }
+  .guide-cmd-icon { font-size:1rem; line-height:1; }
+  .guide-cmd-label { font-size:0.82rem; font-weight:600; flex:1; }
+  .guide-cmd-os { display:flex; gap:3px; }
+  .os-badge { font-size:0.55rem; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; padding:1px 5px; border-radius:4px; }
+  .os-badge.win { background:rgba(58,130,255,0.15); color:var(--blue); }
+  .os-badge.mac { background:rgba(167,139,250,0.15); color:var(--purple); }
+  .os-badge.lin { background:rgba(34,197,94,0.15); color:var(--green); }
+  .guide-cmd-desc { font-size:0.71rem; color:var(--muted); }
+  .guide-run-bar { padding:14px 16px; border-top:1px solid var(--border); flex-shrink:0; display:flex; flex-direction:column; gap:8px; }
+  .guide-run-bar.hidden { display:none; }
+  .guide-selected-label { font-size:0.72rem; color:var(--text); font-weight:600; }
+  .guide-selected-cmd { font-size:0.67rem; color:var(--muted); font-family:'SF Mono','Consolas',monospace; word-break:break-all; margin-top:2px; max-height:40px; overflow:hidden; }
+  .guide-run-row { display:flex; gap:8px; align-items:center; }
+  .guide-machine-select {
+    flex:1; background:rgba(255,255,255,0.05); border:1px solid var(--border2); color:var(--text);
+    padding:8px 10px; border-radius:10px; font-size:0.78rem; font-family:inherit;
+  }
+  .guide-machine-select:focus { outline:none; border-color:rgba(58,130,255,0.5); }
+  .guide-run-btn { background:var(--blue); border:none; color:#fff; padding:8px 18px; border-radius:10px; font-size:0.75rem; font-weight:700; cursor:pointer; font-family:inherit; transition:all 0.2s; white-space:nowrap; }
+  .guide-run-btn:hover { background:#5a95ff; box-shadow:0 0 14px rgba(58,130,255,0.35); }
+  .guide-run-btn:disabled { opacity:0.4; cursor:not-allowed; }
+  .guide-custom-wrap { display:flex; gap:8px; }
+  .guide-custom-input { flex:1; background:rgba(255,255,255,0.05); border:1px solid var(--border2); color:var(--text); padding:8px 10px; border-radius:10px; font-size:0.78rem; font-family:'SF Mono','Consolas',monospace; }
+  .guide-custom-input:focus { outline:none; border-color:rgba(58,130,255,0.5); }
+  .guide-output-wrap { padding:0 16px 14px; flex-shrink:0; display:none; }
+  .guide-output-wrap.visible { display:block; }
+  .guide-output-box { background:#000; border:1px solid var(--border2); border-radius:10px; overflow:hidden; }
+  .guide-output-hdr { display:flex; align-items:center; justify-content:space-between; padding:7px 12px; background:rgba(255,255,255,0.04); border-bottom:1px solid var(--border); }
+  .guide-output-title { font-size:0.68rem; color:var(--muted); font-family:'SF Mono','Consolas',monospace; }
+  .guide-output-btns { display:flex; gap:6px; }
+  .guide-out-btn { background:none; border:none; color:var(--muted); cursor:pointer; font-size:0.68rem; padding:2px 6px; border-radius:4px; font-family:inherit; transition:all 0.15s; }
+  .guide-out-btn:hover { color:var(--text); background:rgba(255,255,255,0.08); }
+  .guide-output-content { padding:12px; font-size:0.75rem; font-family:'SF Mono','Consolas',monospace; color:#d4d4d4; white-space:pre-wrap; word-break:break-all; max-height:220px; overflow-y:auto; line-height:1.5; }
+  .guide-output-content::-webkit-scrollbar { width:4px; }
+  .guide-output-content::-webkit-scrollbar-thumb { background:var(--border2); border-radius:4px; }
+  .guide-spinner { display:inline-block; width:12px; height:12px; border:2px solid var(--border2); border-top-color:var(--blue); border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:-2px; margin-right:6px; }
 </style>
 </head>
 <body>
@@ -749,6 +877,7 @@ HTML = """<!DOCTYPE html>
   </div>
   <div class="header-right">
     <span id="updated"></span>
+    <button class="btn" onclick="openGuide()">⌘ Commands</button>
     <button class="btn" onclick="refresh()">↻ Refresh</button>
   </div>
 </header>
@@ -762,6 +891,46 @@ HTML = """<!DOCTYPE html>
 
 <div class="grid" id="grid">
   <div class="loading"><span class="spin"></span>Polling devices…</div>
+</div>
+
+<!-- Guide overlay + panel -->
+<div class="guide-overlay" id="guide-overlay" onclick="closeGuide()"></div>
+<div class="guide-panel" id="guide-panel">
+  <div class="guide-header">
+    <div class="guide-header-title">⌘ Command <span>Library</span></div>
+    <button class="guide-close" onclick="closeGuide()">✕</button>
+  </div>
+  <div class="guide-search-wrap">
+    <input id="guide-search" class="guide-search" type="text" placeholder="Search commands…" oninput="renderGuide()">
+  </div>
+  <div class="guide-cats" id="guide-cats"></div>
+  <div class="guide-list" id="guide-list"></div>
+  <div class="guide-output-wrap" id="guide-output-wrap">
+    <div class="guide-output-box">
+      <div class="guide-output-hdr">
+        <span class="guide-output-title" id="guide-output-title">output</span>
+        <div class="guide-output-btns">
+          <button class="guide-out-btn" onclick="copyGuideOutput()">Copy</button>
+          <button class="guide-out-btn" onclick="clearGuideOutput()">✕</button>
+        </div>
+      </div>
+      <div class="guide-output-content" id="guide-output-content"></div>
+    </div>
+  </div>
+  <div class="guide-run-bar hidden" id="guide-run-bar">
+    <div>
+      <div class="guide-selected-label" id="guide-sel-label"></div>
+      <div class="guide-selected-cmd" id="guide-sel-cmd"></div>
+    </div>
+    <div class="guide-run-row">
+      <select class="guide-machine-select" id="guide-machine"></select>
+      <button class="guide-run-btn" id="guide-run-btn" onclick="runGuideCmd()">▶ Run</button>
+    </div>
+    <div class="guide-custom-wrap">
+      <input class="guide-custom-input" id="guide-custom-input" type="text" placeholder="Or type a custom command…" onkeydown="if(event.key==='Enter')runCustomCmd()">
+      <button class="guide-run-btn" onclick="runCustomCmd()">▶</button>
+    </div>
+  </div>
 </div>
 
 <!-- Mirror modal -->
@@ -1181,6 +1350,332 @@ document.getElementById('grid').addEventListener('click', function(e) {
 
 refresh();
 setInterval(refresh, 15000);
+
+// ── Command Library ──────────────────────────────────────────────────────────
+
+let _devices = [];
+const _origRefresh = refresh;
+
+// Patch refresh to keep _devices in sync
+const _patchedRefresh = async function() {
+  const grid = document.getElementById('grid');
+  let d;
+  try { const r = await fetch('/api/status'); d = await r.json(); } catch(e) {
+    if (!grid.children.length || grid.querySelector('.loading'))
+      grid.innerHTML = '<div class="loading" style="color:var(--red)">Fetch failed: ' + e.message + '</div>';
+    return;
+  }
+  if (d.devices) _devices = d.devices;
+  // Delegate to original rendering logic by re-using the shared fetch result
+  try {
+    document.getElementById('tailnet-id').textContent = d.tailnet;
+    document.getElementById('updated').textContent    = 'Updated ' + new Date(d.updated).toLocaleTimeString();
+    document.getElementById('s-total').textContent    = d.total;
+    document.getElementById('s-online').textContent   = d.online;
+    document.getElementById('s-offline').textContent  = d.offline;
+    document.getElementById('s-latency').textContent  = d.avg_latency != null ? d.avg_latency + 'ms' : '—';
+    if (!d.devices || !d.devices.length) return;
+    const newHostnames = d.devices.map(dev => dev.hostname);
+    const listChanged  = newHostnames.join('\\0') !== _knownHostnames.join('\\0');
+    if (listChanged || grid.querySelector('.loading')) {
+      grid.innerHTML = d.devices.map(cardHTML).join('');
+      _knownHostnames = newHostnames;
+    } else {
+      d.devices.forEach(dev => {
+        const hash = cardHash(dev);
+        const el   = document.getElementById('card-' + dev.hostname);
+        if (el && el.dataset.hash !== hash) {
+          const tmp = document.createElement('div');
+          tmp.innerHTML = cardHTML(dev);
+          el.replaceWith(tmp.firstElementChild);
+        }
+      });
+    }
+    refreshGuideSelect();
+  } catch(e) { console.error(e); }
+};
+
+// Replace the global refresh
+// (We already defined the original; override via reassignment trick)
+window.refresh = _patchedRefresh;
+setTimeout(() => window.refresh(), 0);
+
+// Command definitions
+// cmd: string = all OS; object {win, mac, lin} = OS-specific
+const LIBRARY = [
+  // ── System ──────────────────────────────────────────────────────────────────
+  { cat:'System', label:'Uptime', icon:'⏱', desc:'How long the machine has been running',
+    cmd:{ win:'net statistics server | findstr /C:"since"', mac:'uptime', lin:'uptime -p' } },
+  { cat:'System', label:'Memory Usage', icon:'🧠', desc:'RAM used vs total',
+    cmd:{ win:'powershell -command "Get-CimInstance Win32_OperatingSystem | Select @{N=\'Used GB\';E={[math]::round(($_.TotalVisibleMemorySize-$_.FreePhysicalMemory)/1MB,2)}},@{N=\'Total GB\';E={[math]::round($_.TotalVisibleMemorySize/1MB,2)}} | Format-List"',
+          mac:'vm_stat | head -8', lin:'free -h' } },
+  { cat:'System', label:'Disk Usage', icon:'💾', desc:'Free and used space on all drives',
+    cmd:{ win:'powershell -command "Get-PSDrive -PSProvider FileSystem | Select Name,@{N=\'Used GB\';E={[math]::round($_.Used/1GB,1)}},@{N=\'Free GB\';E={[math]::round($_.Free/1GB,1)}} | Format-Table -AutoSize"',
+          mac:'df -h', lin:'df -h' } },
+  { cat:'System', label:'CPU Load', icon:'⚡', desc:'Current processor utilization',
+    cmd:{ win:'powershell -command "Get-CimInstance Win32_Processor | Select Name,LoadPercentage | Format-List"',
+          mac:'top -l 1 -s 0 | grep "CPU usage"', lin:'top -bn1 | grep "Cpu(s)"' } },
+  { cat:'System', label:'System Info', icon:'🖥', desc:'OS version, hostname, hardware summary',
+    cmd:{ win:'powershell -command "Get-ComputerInfo | Select WindowsProductName,OsVersion,CsName | Format-List"',
+          mac:'sw_vers', lin:'hostnamectl' } },
+  { cat:'System', label:'Last Reboots', icon:'🔄', desc:'When the machine last restarted',
+    cmd:{ win:'powershell -command "Get-WinEvent -FilterHashtable @{LogName=\'System\'; Id=6005} -MaxEvents 5 | Select TimeCreated,Message | Format-List"',
+          mac:'last reboot | head -5', lin:'last reboot | head -5' } },
+  { cat:'System', label:'Logged In Users', icon:'👤', desc:'Who is currently logged in',
+    cmd:{ win:'query user', mac:'who', lin:'who' } },
+  { cat:'System', label:'Environment Variables', icon:'📝', desc:'Key system environment variables',
+    cmd:{ win:'powershell -command "Get-ChildItem Env: | Select Name,Value | Format-Table -AutoSize"',
+          mac:'env | sort', lin:'env | sort' } },
+
+  // ── GPU ─────────────────────────────────────────────────────────────────────
+  { cat:'GPU', label:'GPU Overview', icon:'🎮', desc:'Name, temp, utilization, VRAM, power draw',
+    cmd:{ win:'nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw --format=csv',
+          lin:'nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw --format=csv' } },
+  { cat:'GPU', label:'GPU Processes', icon:'📊', desc:'All processes currently using the GPU',
+    cmd:{ win:'nvidia-smi', lin:'nvidia-smi' } },
+  { cat:'GPU', label:'VRAM Usage', icon:'📈', desc:'Video memory: used / free / total',
+    cmd:{ win:'nvidia-smi --query-gpu=memory.used,memory.free,memory.total --format=csv',
+          lin:'nvidia-smi --query-gpu=memory.used,memory.free,memory.total --format=csv' } },
+  { cat:'GPU', label:'Driver & CUDA Version', icon:'🔧', desc:'NVIDIA driver and CUDA toolkit version',
+    cmd:{ win:'nvidia-smi --query-gpu=name,driver_version --format=csv,noheader && nvcc --version 2>nul || echo "CUDA not in PATH"',
+          lin:'nvidia-smi --query-gpu=driver_version --format=csv,noheader && nvcc --version 2>/dev/null || echo "CUDA not in PATH"' } },
+  { cat:'GPU', label:'GPU Temperature Log', icon:'🌡', desc:'Temperature over last 10 samples',
+    cmd:{ win:'for /L %i in (1,1,5) do (nvidia-smi --query-gpu=timestamp,temperature.gpu --format=csv,noheader && timeout /t 1 /nobreak >nul)',
+          lin:'for i in $(seq 5); do nvidia-smi --query-gpu=timestamp,temperature.gpu --format=csv,noheader; sleep 1; done' } },
+
+  // ── Network ──────────────────────────────────────────────────────────────────
+  { cat:'Network', label:'Active Connections', icon:'🔗', desc:'Currently established TCP connections',
+    cmd:{ win:'netstat -an | findstr ESTABLISHED', mac:'netstat -an | grep ESTABLISHED', lin:'ss -tn state established' } },
+  { cat:'Network', label:'Listening Ports', icon:'🚪', desc:'Open ports waiting for connections',
+    cmd:{ win:'netstat -ano | findstr LISTENING', mac:'netstat -an | grep LISTEN', lin:'ss -tlnp' } },
+  { cat:'Network', label:'Network Interfaces', icon:'🌐', desc:'IP addresses on each interface',
+    cmd:{ win:'ipconfig', mac:'ifconfig | grep -E "^[a-z]|inet "', lin:'ip -br addr' } },
+  { cat:'Network', label:'Routing Table', icon:'🗺', desc:'Current network routes',
+    cmd:{ win:'route print', mac:'netstat -rn', lin:'ip route' } },
+  { cat:'Network', label:'DNS Servers', icon:'📡', desc:'Configured DNS resolver addresses',
+    cmd:{ win:'ipconfig /all | findstr "DNS Servers"', mac:'cat /etc/resolv.conf', lin:'resolvectl status 2>/dev/null || cat /etc/resolv.conf' } },
+  { cat:'Network', label:'Tailscale Status', icon:'🔵', desc:'Tailscale connection state and peer list',
+    cmd:'tailscale status' },
+  { cat:'Network', label:'Tailscale Ping All', icon:'📶', desc:'Ping all online Tailscale peers',
+    cmd:{ win:'tailscale ping neo-mac', mac:'tailscale ping --c=3 neo', lin:'tailscale ping --c=3 neo-mac' } },
+
+  // ── Processes ────────────────────────────────────────────────────────────────
+  { cat:'Processes', label:'Top CPU (10)', icon:'🔥', desc:'10 processes consuming the most CPU',
+    cmd:{ win:'powershell -command "Get-Process | Sort CPU -Desc | Select -First 10 Name,CPU,Id | Format-Table -AutoSize"',
+          mac:'ps aux | sort -rk 3 | head -11', lin:'ps aux --sort=-%cpu | head -11' } },
+  { cat:'Processes', label:'Top RAM (10)', icon:'🧠', desc:'10 processes consuming the most memory',
+    cmd:{ win:'powershell -command "Get-Process | Sort WS -Desc | Select -First 10 Name,@{N=\'MB\';E={[math]::round($_.WS/1MB,1)}},Id | Format-Table -AutoSize"',
+          mac:'ps aux | sort -rk 4 | head -11', lin:'ps aux --sort=-%mem | head -11' } },
+  { cat:'Processes', label:'Process Count', icon:'#️⃣', desc:'Total number of running processes',
+    cmd:{ win:'powershell -command "(Get-Process).Count"', mac:'ps aux | wc -l', lin:'ps aux | wc -l' } },
+  { cat:'Processes', label:'Find Process by Name', icon:'🔍', desc:'Search for a running process (edit name)',
+    cmd:{ win:'powershell -command "Get-Process | Where Name -like \'*chrome*\' | Select Name,CPU,Id | ft -auto"',
+          mac:'pgrep -l chrome', lin:'pgrep -l chrome' } },
+
+  // ── Services ─────────────────────────────────────────────────────────────────
+  { cat:'Services', label:'Running Services', icon:'⚙️', desc:'All active Windows services',
+    cmd:{ win:'powershell -command "Get-Service | Where Status -eq Running | Select Name,DisplayName | Sort Name | Format-Table -AutoSize"' } },
+  { cat:'Services', label:'Stopped Services', icon:'⏹', desc:'Installed but stopped Windows services',
+    cmd:{ win:'powershell -command "Get-Service | Where Status -eq Stopped | Select Name,DisplayName | Sort Name | Format-Table -AutoSize"' } },
+  { cat:'Services', label:'SSH Service Status', icon:'🔐', desc:'OpenSSH server state',
+    cmd:{ win:'sc query sshd', mac:'sudo launchctl list | grep ssh', lin:'systemctl status ssh 2>/dev/null || systemctl status sshd' } },
+  { cat:'Services', label:'Startup Programs', icon:'🚀', desc:'Programs configured to run at boot',
+    cmd:{ win:'powershell -command "Get-CimInstance Win32_StartupCommand | Select Name,Command,Location | Format-Table -AutoSize"',
+          mac:'launchctl list | grep -v com.apple | head -20', lin:'systemctl list-unit-files --state=enabled | head -20' } },
+
+  // ── Storage ──────────────────────────────────────────────────────────────────
+  { cat:'Storage', label:'Drive List', icon:'💿', desc:'All volumes with size and filesystem type',
+    cmd:{ win:'powershell -command "Get-Volume | Where DriveLetter | Select DriveLetter,FileSystemLabel,@{N=\'Size GB\';E={[math]::round($_.Size/1GB,1)}},@{N=\'Free GB\';E={[math]::round($_.SizeRemaining/1GB,1)}} | Format-Table -AutoSize"',
+          mac:'diskutil list', lin:'lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT' } },
+  { cat:'Storage', label:'Largest Files (C:)', icon:'🗂', desc:'Top 10 largest files on the system drive',
+    cmd:{ win:'powershell -command "Get-ChildItem C:\\ -Recurse -ErrorAction SilentlyContinue | Sort Length -Desc | Select -First 10 FullName,@{N=\'MB\';E={[math]::round($_.Length/1MB,1)}} | Format-Table -AutoSize"' } },
+  { cat:'Storage', label:'Top-Level Folder Sizes', icon:'📁', desc:'Size of each folder in C:\\',
+    cmd:{ win:'powershell -command "Get-ChildItem C:\\ -Directory -ErrorAction SilentlyContinue | ForEach-Object { $s=(Get-ChildItem $_.FullName -Recurse -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum; [PSCustomObject]@{Folder=$_.Name;\'GB\'=[math]::round($s/1GB,2)} } | Sort GB -Desc | ft -auto"',
+          mac:'du -sh /* 2>/dev/null | sort -rh | head -15', lin:'du -sh /* 2>/dev/null | sort -rh | head -15' } },
+
+  // ── Diagnostics ──────────────────────────────────────────────────────────────
+  { cat:'Diagnostics', label:'Event Log Errors', icon:'🚨', desc:'Recent system errors in the Windows event log',
+    cmd:{ win:'powershell -command "Get-EventLog -LogName System -EntryType Error -Newest 10 | Select TimeGenerated,Source,@{N=\'Msg\';E={$_.Message.Substring(0,[math]::min(80,$_.Message.Length))}} | Format-List"' } },
+  { cat:'Diagnostics', label:'Firewall Status', icon:'🛡', desc:'Firewall enabled/disabled state',
+    cmd:{ win:'netsh advfirewall show allprofiles state',
+          mac:'sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate',
+          lin:'ufw status 2>/dev/null || firewall-cmd --state 2>/dev/null || echo "no firewall tool found"' } },
+  { cat:'Diagnostics', label:'Pending Windows Updates', icon:'🔄', desc:'Recently installed hotfixes',
+    cmd:{ win:'powershell -command "Get-HotFix | Sort InstalledOn -Desc | Select -First 5 HotFixID,Description,InstalledOn | Format-Table -AutoSize"' } },
+  { cat:'Diagnostics', label:'Windows Defender Status', icon:'🦠', desc:'AV definitions and scan status',
+    cmd:{ win:'powershell -command "Get-MpComputerStatus | Select AMRunningMode,AntivirusEnabled,AntispywareEnabled,@{N=\'DefUpdated\';E={$_.AntivirusSignatureLastUpdated}} | fl"' } },
+  { cat:'Diagnostics', label:'System Errors (24h)', icon:'📋', desc:'All errors logged in the last 24 hours',
+    cmd:{ win:'powershell -command "Get-WinEvent -FilterHashtable @{LogName=\'System\';Level=2;StartTime=(Get-Date).AddHours(-24)} -MaxEvents 20 -ErrorAction SilentlyContinue | Select TimeCreated,ProviderName,Message | fl"' } },
+];
+
+const _CATS = ['All', ...new Set(LIBRARY.map(c => c.cat))];
+let _selectedCat = 'All';
+let _selectedCmd = null;
+
+function _osKey(osStr) {
+  if (!osStr) return 'win';
+  const s = osStr.toLowerCase();
+  if (s.includes('windows')) return 'win';
+  if (s.includes('macos') || s.includes('darwin')) return 'mac';
+  return 'lin'; // linux, android (Termux)
+}
+
+function _resolveCmd(cmdEntry, osKey) {
+  if (!cmdEntry) return '';
+  if (typeof cmdEntry === 'string') return cmdEntry;
+  return cmdEntry[osKey] || cmdEntry.win || cmdEntry.mac || cmdEntry.lin || '';
+}
+
+function _cmdHasOS(c, key) {
+  if (typeof c.cmd === 'string') return true;
+  return !!c.cmd[key];
+}
+
+function openGuide() {
+  document.getElementById('guide-panel').classList.add('open');
+  document.getElementById('guide-overlay').classList.add('open');
+  buildGuideCats();
+  renderGuide();
+  refreshGuideSelect();
+  document.getElementById('guide-search').focus();
+}
+
+function closeGuide() {
+  document.getElementById('guide-panel').classList.remove('open');
+  document.getElementById('guide-overlay').classList.remove('open');
+}
+
+function buildGuideCats() {
+  const el = document.getElementById('guide-cats');
+  el.innerHTML = _CATS.map(c =>
+    '<button class="guide-cat-btn' + (c === _selectedCat ? ' active' : '') + '" onclick="selectGuideCat(\'' + c + '\')">' + c + '</button>'
+  ).join('');
+}
+
+function selectGuideCat(cat) {
+  _selectedCat = cat;
+  buildGuideCats();
+  renderGuide();
+}
+
+function renderGuide() {
+  const q    = (document.getElementById('guide-search').value || '').toLowerCase();
+  const list = document.getElementById('guide-list');
+
+  let filtered = LIBRARY.filter(c => {
+    if (_selectedCat !== 'All' && c.cat !== _selectedCat) return false;
+    if (q) return (c.label + c.desc + c.cat).toLowerCase().includes(q);
+    return true;
+  });
+
+  if (!filtered.length) {
+    list.innerHTML = '<div style="color:var(--muted);font-size:0.8rem;padding:20px 4px;text-align:center">No commands match</div>';
+    return;
+  }
+
+  const bycat = {};
+  filtered.forEach(c => { (bycat[c.cat] = bycat[c.cat] || []).push(c); });
+
+  list.innerHTML = Object.entries(bycat).map(([cat, cmds]) =>
+    (_selectedCat === 'All' ? '<div class="guide-cat-label">' + cat + '</div>' : '') +
+    cmds.map(c => {
+      const osBadges = (typeof c.cmd === 'string'
+        ? ['win','mac','lin']
+        : Object.keys(c.cmd).filter(k => ['win','mac','lin'].includes(k))
+      ).map(k => '<span class="os-badge ' + k + '">' + (k==='win'?'WIN':k==='mac'?'MAC':'LIN') + '</span>').join('');
+      const sel = _selectedCmd && _selectedCmd.label === c.label && _selectedCmd.cat === c.cat ? ' selected' : '';
+      return '<div class="guide-cmd' + sel + '" onclick="selectCmd(' + JSON.stringify(c).replace(/</g,'\\u003c') + ')">' +
+        '<div class="guide-cmd-top"><span class="guide-cmd-icon">' + c.icon + '</span>' +
+        '<span class="guide-cmd-label">' + c.label + '</span>' +
+        '<div class="guide-cmd-os">' + osBadges + '</div></div>' +
+        '<div class="guide-cmd-desc">' + c.desc + '</div></div>';
+    }).join('')
+  ).join('');
+}
+
+function selectCmd(c) {
+  _selectedCmd = c;
+  renderGuide();
+  const bar = document.getElementById('guide-run-bar');
+  bar.classList.remove('hidden');
+  document.getElementById('guide-sel-label').textContent = c.icon + '  ' + c.label;
+  const selMachine = document.getElementById('guide-machine');
+  const osKey = _osKey((selMachine.selectedOptions[0] || {}).dataset.os);
+  document.getElementById('guide-sel-cmd').textContent = _resolveCmd(c.cmd, osKey);
+}
+
+function refreshGuideSelect() {
+  const sel = document.getElementById('guide-machine');
+  const prev = sel.value;
+  sel.innerHTML = _devices
+    .filter(d => d.has_ssh && d.online)
+    .map(d => '<option value="' + d.hostname + '" data-os="' + d.os + '">' + d.label + ' (' + d.os + ')</option>')
+    .join('');
+  if (prev) sel.value = prev;
+  // Update command preview when machine changes
+  sel.onchange = () => {
+    if (_selectedCmd) {
+      const osKey = _osKey((sel.selectedOptions[0] || {}).dataset.os);
+      document.getElementById('guide-sel-cmd').textContent = _resolveCmd(_selectedCmd.cmd, osKey);
+    }
+  };
+}
+
+async function runGuideCmd() {
+  if (!_selectedCmd) return;
+  const sel      = document.getElementById('guide-machine');
+  const hostname = sel.value;
+  const osKey    = _osKey((sel.selectedOptions[0] || {}).dataset.os);
+  const command  = _resolveCmd(_selectedCmd.cmd, osKey);
+  if (!hostname || !command) { showToast('Select a machine first', 'err'); return; }
+  await _execGuideCmd(hostname, command, _selectedCmd.icon + ' ' + _selectedCmd.label + ' @ ' + hostname);
+}
+
+async function runCustomCmd() {
+  const input    = document.getElementById('guide-custom-input');
+  const command  = input.value.trim();
+  const sel      = document.getElementById('guide-machine');
+  const hostname = sel.value;
+  if (!command) return;
+  if (!hostname) { showToast('Select a machine first', 'err'); return; }
+  await _execGuideCmd(hostname, command, '> ' + command + ' @ ' + hostname);
+  input.value = '';
+}
+
+async function _execGuideCmd(hostname, command, title) {
+  const outWrap   = document.getElementById('guide-output-wrap');
+  const outTitle  = document.getElementById('guide-output-title');
+  const outContent= document.getElementById('guide-output-content');
+  const runBtn    = document.getElementById('guide-run-btn');
+
+  outWrap.classList.add('visible');
+  outTitle.textContent  = title;
+  outContent.innerHTML  = '<span class="guide-spinner"></span>running…';
+  runBtn.disabled = true;
+
+  try {
+    const r = await fetch('/api/run', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({hostname, command})
+    });
+    const d = await r.json();
+    outContent.textContent = d.output || d.error || '[no output]';
+  } catch(e) {
+    outContent.textContent = 'Request failed: ' + e.message;
+  }
+  runBtn.disabled = false;
+  outContent.scrollTop = 0;
+}
+
+function copyGuideOutput() {
+  const text = document.getElementById('guide-output-content').textContent;
+  navigator.clipboard.writeText(text).then(() => showToast('Copied to clipboard'));
+}
+
+function clearGuideOutput() {
+  document.getElementById('guide-output-wrap').classList.remove('visible');
+  document.getElementById('guide-output-content').textContent = '';
+}
 </script>
 </body>
 </html>
