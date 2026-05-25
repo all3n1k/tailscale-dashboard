@@ -6,7 +6,7 @@ This file is the single source of truth for understanding this project. Read it 
 
 ## What This Is
 
-A self-hosted web dashboard for monitoring and controlling a personal Tailscale mesh network. It runs as a Flask server on `neo-mac` (the MacBook Air, always-on hub) at `http://localhost:5555`.
+A self-hosted web dashboard for monitoring and controlling a personal Tailscale mesh network. It runs as a Flask server on `[user]-mac` (the MacBook Air, always-on hub) at `http://localhost:5555`.
 
 Secondary component: an MCP stdio server (`mcp_server.py`) that exposes Tailscale network tools directly to Claude in conversation.
 
@@ -54,19 +54,19 @@ Port is controlled by `PORT` env var (default 5555).
 
 | Hostname | Label | Tailscale IP | OS | SSH User | SSH Port | Category |
 |---|---|---|---|---|---|---|
-| neo-mac | MacBook Air | (self) | macOS | [user] | 22 | laptop |
+| [user]-mac | MacBook Air | (self) | macOS | [user] | 22 | laptop |
 | digitalstorm | Digital Storm Workstation | varies | windows | [user] | 22 | desktop |
-| neo | Neo Laptop | 100.x.x.x | windows | [user] | 22 | laptop |
-| michellepc | Household PC | 100.x.x.x | windows | [user] | 22 | desktop |
+| [user] | Neo Laptop | 100.x.x.x | windows | [user] | 22 | laptop |
+| PC | Household PC | 100.x.x.x | windows | [user] | 22 | desktop |
 | a-pad | A-Pad | 100.x.x.x | windows | [user] | 22 | laptop |
 | galaxy-tab-a7-lite | Galaxy Tab | 100.x.x.x | android | [user] | **8022** | tablet |
-| allens-iphone | iPhone | varies | iOS | — | — | mobile |
+| iphone-old | iPhone | varies | iOS | — | — | mobile |
 | iphone-se-gen-2 | iPhone SE | varies | iOS | — | — | mobile |
-| iphone172 | iPhone 7 | varies | iOS | — | — | mobile |
+| iphone-primary | iPhone 7 | varies | iOS | — | — | mobile |
 
 **SSH access**: desktop, laptop, tablet categories get Terminal buttons. Mobile does not.
 
-**Galaxy Tab**: Termux sshd on port 8022. Any username accepted (key auth). SSH key is `~/.ssh/id_ed25519` on neo-mac.
+**Galaxy Tab**: Termux sshd on port 8022. Any username accepted (key auth). SSH key is `~/.ssh/id_ed25519` on [user]-mac.
 
 **Windows SSH note**: All Windows machines use administrator accounts. The authorized_keys path is `C:\ProgramData\ssh\administrators_authorized_keys` (NOT `~\.ssh\authorized_keys`). Permissions must be restricted to SYSTEM and Administrators only — use `Set-Acl` with PowerShell SIDs, not `icacls /grant` (icacls parameter parsing breaks in PowerShell).
 
@@ -78,10 +78,10 @@ Port is controlled by `PORT` env var (default 5555).
 
 | Machine | CPU | GPU | RAM | Notes |
 |---|---|---|---|---|
-| neo-mac | Apple M-series | — | — | macOS 26 |
+| [user]-mac | Apple M-series | — | — | macOS 26 |
 | digitalstorm | Intel 12900K | RTX 3090 | — | Estimate — not yet scanned |
-| neo | i7-12800H | RTX 3080 Ti Laptop GPU | 32GB | Mobile chip — it's a laptop |
-| michellepc | i7-9700K | GTX 1660 Super | 32GB | Was incorrectly listed as 1650 Ti |
+| [user] | i7-12800H | RTX 3080 Ti Laptop GPU | 32GB | Mobile chip — it's a laptop |
+| PC | i7-9700K | GTX 1660 Super | 32GB | Was incorrectly listed as 1650 Ti |
 | a-pad | Celeron N4120 | Intel UHD 600 | 8GB | Low-power Windows tablet |
 
 ---
@@ -108,7 +108,7 @@ Port is controlled by `PORT` env var (default 5555).
 - `DEVICE_INFO` dict: `hostname → {label, specs, role, category}`
 - `SSH_USERS` dict: `hostname → unix_username`
 - `SSH_PORTS` dict: `hostname → port` (only galaxy-tab-a7-lite: 8022)
-- `SSH_DEFAULT_USER = "neo"`
+- `SSH_DEFAULT_USER = "[user]"`
 - `OS_ICONS` dict: `os_string → icon_key`
 
 **SSH WebSocket endpoint** `/ssh` (lines 180–244)
@@ -182,7 +182,7 @@ claude mcp add --transport stdio tailnet-ssh -- python3 /path/to/tailscale-dashb
 **Tools exposed**:
 - `tailnet_list_devices(online_only?)` — lists all Tailscale devices with status
 - `tailnet_run(hostname, command, username?)` — SSH into a Tailscale peer, run command
-- `tailnet_run_local(command)` — run command locally on neo-mac
+- `tailnet_run_local(command)` — run command locally on [user]-mac
 
 **Tailscale cache**: Same TTL-3s pattern as dashboard.py.
 
@@ -202,7 +202,7 @@ Note: mcp_server.py does NOT have SSH_PORTS — it uses port 22 for all hosts. T
    ```
    Then update `DEVICE_INFO["digitalstorm"]["specs"]` in dashboard.py.
 
-2. **Neo PC sleep settings**: `powercfg /change standby-timeout-ac 0` hasn't been run on the neo laptop yet (was done on a-pad). Run via `tailnet_run` on "neo".
+2. **Neo PC sleep settings**: `powercfg /change standby-timeout-ac 0` hasn't been run on the [user] laptop yet (was done on a-pad). Run via `tailnet_run` on "[user]".
 
 3. **mcp_server.py SSH port support**: `tailnet_run` always uses port 22 — Galaxy Tab (port 8022) can't be reached. Would need `SSH_PORTS` dict and `-p` flag added to the SSH command.
 
