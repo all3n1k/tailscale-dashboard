@@ -208,6 +208,8 @@ def _ssh_ws_pty(ws, ip, username, port, cols, rows):
             if master in r:
                 try:
                     data = os.read(master, 4096)
+                    if not data:
+                        break
                     ws.send(json.dumps({"t": "o", "d": data.decode("utf-8", errors="replace")}))
                 except OSError:
                     break
@@ -215,15 +217,19 @@ def _ssh_ws_pty(ws, ip, username, port, cols, rows):
             if ws_sock in r:
                 try:
                     msg = ws.receive(timeout=0.1)
-                    if msg:
-                        m = json.loads(msg)
-                        if m["t"] == "i":
-                            os.write(master, m["d"].encode("utf-8"))
-                        elif m["t"] == "r":
-                            fcntl.ioctl(master, termios.TIOCSWINSZ,
-                                        struct.pack("HHHH", int(m["rows"]), int(m["cols"]), 0, 0))
+                    if msg is None:
+                        break
+                    m = json.loads(msg)
+                    if m["t"] == "i":
+                        os.write(master, m["d"].encode("utf-8"))
+                    elif m["t"] == "r":
+                        fcntl.ioctl(master, termios.TIOCSWINSZ,
+                                    struct.pack("HHHH", int(m["rows"]), int(m["cols"]), 0, 0))
                 except Exception:
                     pass
+            
+            # Prevent potential busy-looping if select/receive state is jittery
+            time.sleep(0.01)
     finally:
         try: proc.terminate()
         except Exception: pass
@@ -255,12 +261,13 @@ def _ssh_ws_paramiko(ws, ip, username, port, cols, rows):
 
             try:
                 msg = ws.receive(timeout=0.05)
-                if msg:
-                    m = json.loads(msg)
-                    if m["t"] == "i":
-                        chan.send(m["d"])
-                    elif m["t"] == "r":
-                        chan.resize_pty(width=int(m["cols"]), height=int(m["rows"]))
+                if msg is None:
+                    break
+                m = json.loads(msg)
+                if m["t"] == "i":
+                    chan.send(m["d"])
+                elif m["t"] == "r":
+                    chan.resize_pty(width=int(m["cols"]), height=int(m["rows"]))
             except Exception:
                 pass
 
@@ -1213,7 +1220,7 @@ async function askAssistant(winEl, customPrompt = null) {
     });
     
     // Check for autonomous command execution
-    let execMatch = d.response.match(/<exec>([\s\S]*?)<\/exec>/);
+    let execMatch = d.response.match(/<exec>([\\s\\S]*?)<\/exec>/);
     if (execMatch) {
       let cmd = execMatch[1].trim();
       botMsg.innerHTML = '<span class="guide-spinner"></span>Running: <code>' + cmd + '</code>...';
@@ -1238,7 +1245,7 @@ async function askAssistant(winEl, customPrompt = null) {
       return askAssistant(winEl, "Continue based on the command output.");
     }
 
-    let html = d.response.replace(/```(?:[a-z]*\n)?([\s\S]*?)```/g, (m, code) => {
+    let html = d.response.replace(/```(?:[a-z]*\n)?([\\s\\S]*?)```/g, (m, code) => {
       const clean = code.trim();
       return '<pre><code>' + clean + '</code><button class="copy-btn" onclick="copyToAssistant(this)">Copy</button></pre>';
     });
@@ -1349,7 +1356,7 @@ async function openTerminal(ip, username, port, label) {
             if (m.role === 'user') {
               el.textContent = 'Q: ' + m.content;
             } else {
-              el.innerHTML = m.content.replace(/```(?:[a-z]*\n)?([\s\S]*?)```/g, (mt, code) => {
+              el.innerHTML = m.content.replace(/```(?:[a-z]*\n)?([\\s\\S]*?)```/g, (mt, code) => {
                 return '<pre><code>' + code.trim() + '</code><button class="copy-btn" onclick="copyToAssistant(this)">Copy</button></pre>';
               });
             }
