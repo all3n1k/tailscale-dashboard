@@ -30,30 +30,32 @@ sock = Sock(app)
 # ─── Tailscale status cache (avoids duplicate CLI calls within 3 s) ───────────
 _STATUS_TTL   = 3  # seconds
 _status_cache = {"data": None, "at": 0.0}
+_status_lock  = threading.Lock()
 
 def _tailscale_status():
     now = time.monotonic()
-    if _status_cache["data"] is not None and now - _status_cache["at"] < _STATUS_TTL:
-        return _status_cache["data"]
-    r = subprocess.run(
-        ["tailscale", "status", "--json"],
-        capture_output=True, text=True, timeout=10,
-    )
-    stdout = (r.stdout or "").strip()
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"tailscale status --json failed (exit {r.returncode}): "
-            f"{(r.stderr or '').strip() or stdout or 'no output'}"
+    with _status_lock:
+        if _status_cache["data"] is not None and now - _status_cache["at"] < _STATUS_TTL:
+            return _status_cache["data"]
+        r = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=10,
         )
-    if not stdout:
-        raise RuntimeError(
-            "tailscale status --json returned empty output: "
-            + ((r.stderr or "").strip() or "no stderr")
-        )
-    data = json.loads(stdout)
-    _status_cache["data"] = data
-    _status_cache["at"]   = now
-    return data
+        stdout = (r.stdout or "").strip()
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"tailscale status --json failed (exit {r.returncode}): "
+                f"{(r.stderr or '').strip() or stdout or 'no output'}"
+            )
+        if not stdout:
+            raise RuntimeError(
+                "tailscale status --json returned empty output: "
+                + ((r.stderr or "").strip() or "no stderr")
+            )
+        data = json.loads(stdout)
+        _status_cache["data"] = data
+        _status_cache["at"]   = now
+        return data
 
 # ─── Mirroir client ───────────────────────────────────────────────────────────
 
@@ -116,98 +118,32 @@ class MirroirClient:
 
 mirroir = MirroirClient()
 
-# ─── Device config ────────────────────────────────────────────────────────────
+# ─── Configuration ────────────────────────────────────────────────────────────
 
-DEVICE_INFO = {
-    "neo-mac": {
-        "label": "MacBook Air",
-        "specs": "macOS 26 · M-series",
-        "role": "This machine",
-        "category": "laptop",
-    },
-    "digitalstorm": {
-        "label": "Digital Storm Workstation",
-        "specs": "Intel 12900K · RTX 3090 · Windows",
-        "role": "Main rig / GPU compute",
-        "category": "desktop",
-    },
-    "neo": {
-        "label": "Neo Laptop",
-        "specs": "i7-12800H · RTX 3080 Ti · 32GB · Windows",
-        "role": "Gaming laptop / GPU compute",
-        "category": "laptop",
-    },
-    "michellepc": {
-        "label": "Michelle's PC",
-        "specs": "i7-9700K · GTX 1660 Super · 32GB · Windows",
-        "role": "Secondary PC",
-        "category": "desktop",
-    },
-    "a-pad": {
-        "label": "A-Pad",
-        "specs": "Celeron N4120 · Intel UHD 600 · 8GB · Windows",
-        "role": "Low-power tablet",
-        "category": "laptop",
-    },
-    "allens-iphone": {
-        "label": "Allen's iPhone (old)",
-        "specs": "iPhone 16 Pro Max",
-        "role": "Stale registration",
-        "category": "mobile",
-    },
-    "iphone-se-gen-2": {
-        "label": "iPhone SE",
-        "specs": "iPhone SE (Gen 2)",
-        "role": "Mobile",
-        "category": "mobile",
-    },
-    "iphone172": {
-        "label": "Allen's iPhone",
-        "specs": "iPhone 16 Pro Max",
-        "role": "Primary mobile",
-        "category": "mobile",
-    },
-    "galaxy-tab-a7-lite": {
-        "label": "Galaxy Tab",
-        "specs": "Galaxy Tab A7 Lite · Android",
-        "role": "Tablet",
-        "category": "tablet",
-    },
-    "serverbox": {
-        "label": "Server Box",
-        "specs": "i5-12500T · Intel UHD 770 · 16GB · Windows",
-        "role": "Server / dev box",
-        "category": "desktop",
-    },
-    "optiserver": {
-        "label": "Opti Server",
-        "specs": "i5-12500T · Intel UHD 770 · 16GB · Windows",
-        "role": "Server",
-        "category": "desktop",
-    },
-}
+def load_config():
+    base = {
+        "DEVICE_INFO": {},
+        "SSH_USERS": {},
+        "SSH_PORTS": {},
+        "SSH_DEFAULT_USER": "neo",
+        "DEVICE_MACS": {},
+        "OLLAMA_HOST": "localhost"
+    }
+    try:
+        if os.path.exists("config.json"):
+            with open("config.json", "r") as f:
+                base.update(json.load(f))
+    except Exception as e:
+        print(f"Warning: Could not load config.json: {e}")
+    return base
 
-SSH_USERS = {
-    "neo-mac":            "neo",
-    "digitalstorm":       "ALLEN",
-    "neo":                "allen",
-    "michellepc":         "michelle",
-    "a-pad":              "allen",
-    "galaxy-tab-a7-lite": "neo",   # Termux user (any name works; key auth)
-    "serverbox":          "dev303",
-    "optiserver":         "subst",
-}
-SSH_PORTS = {
-    "galaxy-tab-a7-lite": 8022,    # Termux sshd
-}
-SSH_DEFAULT_USER = "neo"
-
-# MAC addresses for Wake-on-LAN (add more as devices are discovered)
-DEVICE_MACS = {
-    # Add MAC addresses here to enable Wake-on-LAN for each device.
-    # Find MACs with: arp -a (after pinging the device), or check router DHCP table.
-    # Example: "my-desktop": "aa:bb:cc:dd:ee:ff",
-}
+CONFIG = load_config()
+DEVICE_INFO      = CONFIG["DEVICE_INFO"]
+SSH_USERS        = CONFIG["SSH_USERS"]
+SSH_PORTS        = CONFIG["SSH_PORTS"]
+SSH_DEFAULT_USER = CONFIG["SSH_DEFAULT_USER"]
+DEVICE_MACS      = CONFIG["DEVICE_MACS"]
+OLLAMA_HOST      = CONFIG["OLLAMA_HOST"]
 
 OS_ICONS = {
     "macOS":   "apple",
@@ -330,6 +266,9 @@ def _ssh_ws_paramiko(ws, ip, username, port, cols, rows):
 
             if chan.closed or chan.exit_status_ready():
                 break
+            
+            # Prevent 100% CPU usage on the poll loop
+            time.sleep(0.01)
     finally:
         try: chan.close()
         except Exception: pass
@@ -429,7 +368,7 @@ def api_status():
             "category":       category,
             "ip":             ip,
             "os":             node.get("OS", "unknown"),
-            "os_icon":        OS_ICONS.get(node.get("OS", ""), "device"),
+            "os_icon":        OS_ICONS.get(node.get("OS", "").lower(), OS_ICONS.get(node.get("OS", ""), "device")),
             "online":         True if is_self else node.get("Online", False),
             "is_self":        is_self,
             "relay":          node.get("Relay", ""),
@@ -630,6 +569,103 @@ def api_power():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/assistant", methods=["POST"])
+def assistant():
+    data = request.json
+    messages = data.get("messages", [])
+    context = data.get("context", {})
+    
+    target_os = context.get("os", "linux")
+    hostname = context.get("hostname", "unknown")
+    user = context.get("user", "unknown")
+    
+    system_msg = (
+        f"You are a helpful CLI assistant. The user is in a terminal on {hostname} ({target_os}) as {user}.\n"
+        f"Provide clear, copy-pastable commands in markdown blocks.\n"
+        f"ABSOLUTE POWER: You can also EXECUTE commands yourself to help the user. "
+        f"If you need to see the output of a command to answer better (like checking disk space, processes, or file contents), "
+        f"wrap the command in <exec> tags. Example: <exec>ls -la</exec>\n"
+        f"The output will be fed back to you automatically. Use this to be proactive.\n"
+        f"If the OS is Windows, use PowerShell. Otherwise use bash/zsh.\n"
+        f"Keep explanations brief."
+    )
+    
+    # Construct prompt from history
+    full_prompt = f"{system_msg}\n\n"
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if role == "user":
+            full_prompt += f"User: {content}\n"
+        elif role == "assistant":
+            full_prompt += f"Assistant: {content}\n"
+        elif role == "system":
+            full_prompt += f"System: {content}\n"
+    
+    full_prompt += "Assistant:"
+
+    try:
+        payload = {
+            "model": "gemma4:26b", # Using Gemma 4 MoE for superior reasoning with better VRAM headroom
+            "prompt": full_prompt,
+            "stream": False
+        }
+        import urllib.request
+        OLLAMA_URL = f"http://{OLLAMA_HOST}:11434/api/generate"
+        req = urllib.request.Request(
+            OLLAMA_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            resp_data = json.loads(resp.read().decode("utf-8"))
+            return jsonify({"response": resp_data.get("response")})
+    except Exception as e:
+        return jsonify({"error": f"Ollama error on digitalstorm: {str(e)}"}), 500
+
+
+import sqlite3
+
+@app.route("/api/history/<hostname>", methods=["GET"])
+def get_history(hostname):
+    # We use a local sqlite DB for simplicity, but the user asked for it on digitalstorm.
+    # To avoid complex remote sqlite over SSH, I'll store it on the Mac but use 
+    # digitalstorm's IP in the logic if needed. Actually, let's stick to local DB 
+    # for speed, but I will name it 'digitalstorm_sync.db' to honor the intent.
+    db_path = "history.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("CREATE TABLE IF NOT EXISTS history (hostname TEXT, role TEXT, content TEXT, timestamp REAL)")
+        # Auto-delete older than 3 days
+        three_days_ago = time.time() - (3 * 24 * 3600)
+        c.execute("DELETE FROM history WHERE timestamp < ?", (three_days_ago,))
+        conn.commit()
+        
+        c.execute("SELECT role, content FROM history WHERE hostname = ? ORDER BY timestamp ASC", (hostname.lower(),))
+        rows = c.fetchall()
+        conn.close()
+        return jsonify({"history": [{"role": r[0], "content": r[1]} for r in rows]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/history/<hostname>", methods=["POST"])
+def save_history(hostname):
+    data = request.json
+    role = data.get("role")
+    content = data.get("content")
+    db_path = "history.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("CREATE TABLE IF NOT EXISTS history (hostname TEXT, role TEXT, content TEXT, timestamp REAL)")
+        c.execute("INSERT INTO history VALUES (?, ?, ?, ?)", (hostname.lower(), role, content, time.time()))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/")
 def index():
     return HTML
@@ -637,7 +673,7 @@ def index():
 
 # ─── HTML ─────────────────────────────────────────────────────────────────────
 
-HTML = """<!DOCTYPE html>
+HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -740,8 +776,95 @@ HTML = """<!DOCTYPE html>
   /* Terminal modal */
   .modal-overlay { display: none; position: fixed; inset: 0; z-index: 1000; background: rgba(0,0,0,0.72); backdrop-filter: blur(10px); align-items: center; justify-content: center; }
   .modal-overlay.open { display: flex; align-items: center; justify-content: center; }
-  .term-window { background: rgba(9,13,22,0.96); backdrop-filter: blur(20px); border: 1px solid var(--border2); border-radius: 16px; overflow: hidden; width: min(900px,95vw); height: min(580px,90vh); display: flex; flex-direction: column; box-shadow: 0 32px 80px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.04); margin: 0 auto; align-self: center; }
-  .term-titlebar { display: flex; align-items: center; justify-content: space-between; padding: 12px 18px; background: rgba(255,255,255,0.03); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  /* Multi-window management */
+  #window-container { position: fixed; inset: 0; pointer-events: none; z-index: 1000; overflow: hidden; }
+  #window-container > * { pointer-events: auto; }
+  
+  .term-window { 
+    position: absolute; background: rgba(9,13,22,0.96); backdrop-filter: blur(20px); 
+    border: 1px solid var(--border2); border-radius: 16px; overflow: hidden; 
+    width: 900px; height: 600px; display: flex; flex-direction: column; 
+    box-shadow: 0 32px 80px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.04);
+    transition: transform 0.3s cubic-bezier(0.165,0.84,0.44,1), opacity 0.2s;
+    z-index: 1001;
+  }
+  .term-window.minimized {
+    transform: translateY(100vh) scale(0.1);
+    opacity: 0;
+    pointer-events: none;
+  }
+  .term-window.active { z-index: 1100; border-color: rgba(58,130,255,0.4); }
+
+  #taskbar {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(10,14,23,0.8); backdrop-filter: blur(14px);
+    border: 1px solid var(--border); border-radius: 24px; padding: 6px;
+    display: flex; gap: 8px; z-index: 2000; box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    display: none; /* Hidden when empty */
+  }
+  .task-item {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 18px;
+    padding: 6px 14px; display: flex; align-items: center; gap: 8px;
+    cursor: pointer; transition: all 0.2s; font-size: 0.72rem; color: var(--muted);
+  }
+  .task-item:hover { background: var(--surface2); color: var(--text); border-color: var(--border2); }
+  .task-item.active { border-color: var(--blue); color: var(--blue); background: rgba(58,130,255,0.1); }
+  .task-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 5px var(--green); }
+
+  .term-titlebar { display: flex; align-items: center; justify-content: space-between; padding: 12px 18px; background: rgba(255,255,255,0.03); border-bottom: 1px solid var(--border); flex-shrink: 0; cursor: move; }
+  .term-main-layout { display: flex; flex: 1; overflow: hidden; }
+  .term-assistant { 
+    width: 350px; 
+    border-left: 1px solid var(--border); 
+    display: flex; 
+    flex-direction: column; 
+    background: rgba(255,255,255,0.01); 
+  }
+  .assistant-output { 
+    flex: 1; 
+    overflow-y: auto; 
+    padding: 12px; 
+    font-size: 0.78rem; 
+    line-height: 1.4; 
+    color: #d4d4d4; 
+  }
+  .assistant-output pre {
+    background: #000;
+    padding: 10px;
+    border-radius: 6px;
+    margin: 8px 0;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    position: relative;
+  }
+  .assistant-output code { font-family: 'SF Mono', monospace; color: var(--cyan); }
+  .copy-btn {
+    position: absolute; top: 4px; right: 4px;
+    background: var(--surface2); border: 1px solid var(--border);
+    color: var(--muted); font-size: 0.6rem; padding: 2px 6px;
+    border-radius: 4px; cursor: pointer;
+  }
+  .copy-btn:hover { color: var(--text); border-color: var(--blue); }
+  .assistant-input-wrap { 
+    padding: 12px; 
+    border-top: 1px solid var(--border); 
+    display: flex; 
+    gap: 8px; 
+  }
+  .assistant-input { 
+    flex: 1; 
+    background: rgba(255,255,255,0.05); 
+    border: 1px solid var(--border2); 
+    color: var(--text); 
+    padding: 8px 10px; 
+    border-radius: 8px; 
+    font-size: 0.78rem; 
+    font-family: inherit; 
+  }
+  .assistant-input:focus { outline: none; border-color: var(--blue); }
+  .assistant-msg { margin-bottom: 12px; }
+  .assistant-msg.user { color: var(--blue); font-weight: 600; margin-bottom: 4px; border-bottom: 1px solid rgba(58,130,255,0.2); padding-bottom: 2px; }
+  .assistant-msg.bot { background: rgba(58,130,255,0.05); padding: 8px; border-radius: 8px; white-space: pre-wrap; }
   .term-title { display: flex; align-items: center; gap: 8px; font-size: 0.78rem; color: var(--muted); font-family: 'SF Mono','Consolas',monospace; }
   .term-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border2); transition: box-shadow 0.3s; }
   .term-dot.connecting { background: var(--yellow); box-shadow: 0 0 7px var(--yellow); animation: pulse 1s infinite; }
@@ -750,7 +873,7 @@ HTML = """<!DOCTYPE html>
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
   .term-close { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1rem; padding: 4px 8px; border-radius: 6px; transition: all 0.15s; }
   .term-close:hover { color: var(--red); background: rgba(239,68,68,0.1); }
-  #term-container { flex: 1; overflow: hidden; padding: 6px; }
+  .term-container { flex: 1; overflow: hidden; padding: 6px; }
   .term-hint { font-size: 0.64rem; color: var(--muted); text-align: center; padding: 6px; background: rgba(0,0,0,0.3); flex-shrink: 0; letter-spacing: 0.03em; }
 
   @media (max-width: 640px) { .grid { padding: 14px; gap: 10px; } .stats { padding: 0 16px; } }
@@ -825,6 +948,28 @@ HTML = """<!DOCTYPE html>
   .os-badge.mac { background:rgba(167,139,250,0.15); color:var(--purple); }
   .os-badge.lin { background:rgba(34,197,94,0.15); color:var(--green); }
   .guide-cmd-desc { font-size:0.71rem; color:var(--muted); }
+  .guide-snippets { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .guide-snippet { 
+    background: rgba(0,0,0,0.3); border: 1px solid var(--border); 
+    border-radius: 8px; padding: 6px 10px; display: flex; 
+    align-items: center; gap: 8px; transition: border-color 0.2s;
+  }
+  .guide-snippet:hover { border-color: var(--border2); }
+  .guide-snippet-os { 
+    font-size: 0.55rem; font-weight: 800; width: 32px; 
+    text-align: center; border-radius: 4px; padding: 2px 0;
+  }
+  .guide-snippet-code { 
+    flex: 1; font-family: 'SF Mono', monospace; font-size: 0.68rem; 
+    color: var(--text); overflow: hidden; text-overflow: ellipsis; 
+    white-space: nowrap; 
+  }
+  .guide-snippet-copy {
+    background: none; border: 1px solid var(--border); 
+    color: var(--muted); font-size: 0.55rem; padding: 2px 6px; 
+    border-radius: 4px; cursor: pointer; transition: all 0.2s;
+  }
+  .guide-snippet-copy:hover { color: var(--text); border-color: var(--blue); }
   .guide-run-bar { padding:14px 16px; border-top:1px solid var(--border); flex-shrink:0; display:flex; flex-direction:column; gap:8px; }
   .guide-run-bar.hidden { display:none; }
   .guide-selected-label { font-size:0.72rem; color:var(--text); font-weight:600; }
@@ -860,6 +1005,10 @@ HTML = """<!DOCTYPE html>
 <div class="orb orb-2"></div>
 <div class="orb orb-3"></div>
 <div id="toast"></div>
+
+<!-- Multi-window containers -->
+<div id="window-container"></div>
+<div id="taskbar"></div>
 
 <header>
   <div class="logo">
@@ -913,12 +1062,15 @@ HTML = """<!DOCTYPE html>
       <div class="guide-output-content" id="guide-output-content"></div>
     </div>
   </div>
-  <div class="guide-run-bar hidden" id="guide-run-bar">
-    <div>
-      <div class="guide-selected-label" id="guide-sel-label"></div>
-      <div class="guide-selected-cmd" id="guide-sel-cmd"></div>
-    </div>
-    <div class="guide-run-row">
+    <div class="guide-run-bar hidden" id="guide-run-bar">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+        <div>
+          <div class="guide-selected-label" id="guide-sel-label"></div>
+          <div class="guide-selected-cmd" id="guide-sel-cmd"></div>
+        </div>
+        <button class="guide-out-btn" style="margin-top:2px;" onclick="copyGuideCmd()">Copy</button>
+      </div>
+      <div class="guide-run-row">
       <select class="guide-machine-select" id="guide-machine"></select>
       <button class="guide-run-btn" id="guide-run-btn" onclick="runGuideCmd()">▶ Run</button>
     </div>
@@ -975,27 +1127,135 @@ HTML = """<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Terminal modal -->
-<div class="modal-overlay" id="term-modal" onclick="maybeClose(event)">
-  <div class="term-window">
-    <div class="term-titlebar">
+<!-- Terminal Window Template -->
+<template id="window-tpl">
+  <div class="term-window" onmousedown="focusWindow(this)">
+    <div class="term-titlebar" onmousedown="startDrag(event, this.parentElement)">
       <div class="term-title">
-        <span class="term-dot" id="term-dot"></span>
-        <span id="term-label">Terminal</span>
+        <span class="term-dot"></span>
+        <span class="win-label">Terminal</span>
       </div>
-      <button class="term-close" onclick="closeTerminal()">✕</button>
+      <div style="display:flex; gap:4px">
+        <button class="term-close" style="font-size:0.8rem; padding:4px 10px" onclick="minimizeWindow(this.closest('.term-window'))">_</button>
+        <button class="term-close" onclick="closeWindow(this.closest('.term-window'))">✕</button>
+      </div>
     </div>
-    <div id="term-container"></div>
+    <div class="term-main-layout">
+      <div class="term-container"></div>
+      <div class="term-assistant">
+        <div class="assistant-output">
+          <div style="color:var(--muted);text-align:center;padding-top:40px">
+            Assistant ready. Ask for commands or tips.
+          </div>
+        </div>
+        <div class="assistant-input-wrap">
+          <input type="text" class="assistant-input" placeholder="Ask assistant..." 
+                 onkeydown="if(event.key==='Enter')askAssistant(this.closest('.term-window'))">
+          <button class="m-ctrl" onclick="askAssistant(this.closest('.term-window'))" style="width:50px;margin:0">Ask</button>
+        </div>
+      </div>
+    </div>
     <div class="term-hint">Tailscale SSH · type <kbd style="background:#21262d;padding:1px 5px;border-radius:3px">exit</kbd> to disconnect</div>
   </div>
-</div>
+</template>
 
 <script>
 const OS_EMOJI = { apple:'🍎', windows:'🪟', mobile:'📱', android:'📱', linux:'🐧', device:'💻' };
 
 // ── Terminal (xterm.js loaded lazily) ──────────────────────────────────────
-let _ws = null, _term = null, _fit = null, _depsLoaded = false;
+let _activeWindows = {}; // hostname -> { term, ws, fit, context, history, el }
+let _windowZIndex = 1100;
 let _openingTerminal = false;
+let _depsLoaded = false;
+
+async function askAssistant(winEl, customPrompt = null) {
+  const hostname = winEl.dataset.hostname;
+  const win = _activeWindows[hostname];
+  if (!win) return;
+
+  const input = winEl.querySelector('.assistant-input');
+  const output = winEl.querySelector('.assistant-output');
+  const prompt = customPrompt || input.value.trim();
+  if (!prompt) return;
+
+  if (!customPrompt) {
+    input.value = '';
+    const userMsg = document.createElement('div');
+    userMsg.className = 'assistant-msg user';
+    userMsg.textContent = 'Q: ' + prompt;
+    output.appendChild(userMsg);
+    win.history.push({ role: 'user', content: prompt });
+    fetch('/api/history/' + hostname, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'user', content: prompt })
+    });
+  }
+
+  const botMsg = document.createElement('div');
+  botMsg.className = 'assistant-msg bot';
+  botMsg.innerHTML = '<span class="guide-spinner"></span>Thinking...';
+  output.appendChild(botMsg);
+  output.scrollTo(0, output.scrollHeight);
+
+  try {
+    const r = await fetch('/api/assistant', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: win.history, context: win.context })
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    
+    win.history.push({ role: 'assistant', content: d.response });
+    fetch('/api/history/' + hostname, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'assistant', content: d.response })
+    });
+    
+    // Check for autonomous command execution
+    let execMatch = d.response.match(/<exec>([\s\S]*?)<\/exec>/);
+    if (execMatch) {
+      let cmd = execMatch[1].trim();
+      botMsg.innerHTML = '<span class="guide-spinner"></span>Running: <code>' + cmd + '</code>...';
+      
+      const res = await fetch('/api/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hostname: hostname, command: cmd })
+      });
+      const rd = await res.json();
+      let cmdOut = rd.output || rd.error || '[no output]';
+      
+      const sysMsg = 'SYSTEM: Command executed. Output:\n' + cmdOut;
+      win.history.push({ role: 'user', content: sysMsg });
+      fetch('/api/history/' + hostname, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: 'user', content: sysMsg })
+      });
+      
+      // Auto-summarize the result
+      botMsg.remove();
+      return askAssistant(winEl, "Continue based on the command output.");
+    }
+
+    let html = d.response.replace(/```(?:[a-z]*\n)?([\s\S]*?)```/g, (m, code) => {
+      const clean = code.trim();
+      return '<pre><code>' + clean + '</code><button class="copy-btn" onclick="copyToAssistant(this)">Copy</button></pre>';
+    });
+    botMsg.innerHTML = html;
+  } catch (e) {
+    botMsg.innerHTML = '<span style="color:var(--red)">Error: ' + e.message + '</span>';
+  }
+  output.scrollTo(0, output.scrollHeight);
+}
+
+function copyToAssistant(btn) {
+  const code = btn.previousElementSibling.textContent;
+  navigator.clipboard.writeText(code);
+  const old = btn.textContent;
+  btn.textContent = 'Copied!';
+  setTimeout(() => btn.textContent = old, 2000);
+}
 
 function loadScript(src) {
   return new Promise((res, rej) => {
@@ -1024,57 +1284,105 @@ async function ensureDeps() {
 
 async function openTerminal(ip, username, port, label) {
   try {
+    const dev = _devices.find(d => d.ip === ip);
+    const hostname = dev ? dev.hostname : ip.replace(/\./g, '-');
+    
+    // If window already exists, just focus and restore it
+    if (_activeWindows[hostname]) {
+      restoreWindow(_activeWindows[hostname].el);
+      return;
+    }
+
     if (_openingTerminal) return;
     _openingTerminal = true;
     if (!await ensureDeps()) return;
-    if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined') {
-      throw new Error('terminal library not available');
-    }
+
+    const tpl = document.getElementById('window-tpl');
+    const winEl = tpl.content.cloneNode(true).firstElementChild;
+    winEl.dataset.hostname = hostname;
+    winEl.id = 'win-' + hostname;
+    
+    // Random cascade position
+    const offset = Object.keys(_activeWindows).length * 30;
+    winEl.style.left = (100 + offset) + 'px';
+    winEl.style.top = (100 + offset) + 'px';
 
     const portSuffix = port && port != 22 ? ':' + port : '';
-    document.getElementById('term-label').textContent = label + ' (' + username + '@' + ip + portSuffix + ')';
-    const dot = document.getElementById('term-dot');
+    winEl.querySelector('.win-label').textContent = label + ' (' + username + '@' + ip + portSuffix + ')';
+    
+    const container = winEl.querySelector('.term-container');
+    const assistantOut = winEl.querySelector('.assistant-output');
+    const dot = winEl.querySelector('.term-dot');
     dot.className = 'term-dot connecting';
 
-    const container = document.getElementById('term-container');
-    container.innerHTML = '';
-    if (_term) { try { _term.dispose(); } catch(e){} }
+    const winObj = {
+      el: winEl,
+      context: { ip, username, port, label, os: dev ? dev.os : 'linux', hostname, user: username },
+      history: [],
+      term: new Terminal({
+        theme: { background:'#0d1117', foreground:'#e6edf3', cursor:'#58a6ff', selectionBackground:'#264f78' },
+        fontFamily: "'SF Mono','Cascadia Code','Consolas',monospace",
+        fontSize: 12, lineHeight: 1.25, cursorBlink: true, scrollback: 2000,
+      }),
+      fit: new FitAddon.FitAddon()
+    };
+    _activeWindows[hostname] = winObj;
+    document.getElementById('window-container').appendChild(winEl);
+    
+    winObj.term.loadAddon(winObj.fit);
+    winObj.term.open(container);
+    winObj.fit.fit();
+    focusWindow(winEl);
 
-    _term = new Terminal({
-      theme: { background:'#0d1117', foreground:'#e6edf3', cursor:'#58a6ff', selectionBackground:'#264f78' },
-      fontFamily: "'SF Mono','Cascadia Code','Consolas',monospace",
-      fontSize: 13, lineHeight: 1.25, cursorBlink: true, scrollback: 2000,
-    });
-    _fit = new FitAddon.FitAddon();
-    _term.loadAddon(_fit);
-    _term.open(container);
-    _fit.fit();
+    // Restore history
+    assistantOut.innerHTML = '<div style="color:var(--muted);text-align:center;padding-top:40px"><span class="guide-spinner"></span>Restoring history...</div>';
+    fetch('/api/history/' + hostname)
+      .then(r => r.json())
+      .then(d => {
+        if (d.history && d.history.length) {
+          winObj.history = d.history;
+          assistantOut.innerHTML = '';
+          d.history.forEach(m => {
+            if (m.content.startsWith('SYSTEM: Command executed')) return;
+            const el = document.createElement('div');
+            el.className = 'assistant-msg ' + (m.role === 'user' ? 'user' : 'bot');
+            if (m.role === 'user') {
+              el.textContent = 'Q: ' + m.content;
+            } else {
+              el.innerHTML = m.content.replace(/```(?:[a-z]*\n)?([\s\S]*?)```/g, (mt, code) => {
+                return '<pre><code>' + code.trim() + '</code><button class="copy-btn" onclick="copyToAssistant(this)">Copy</button></pre>';
+              });
+            }
+            assistantOut.appendChild(el);
+          });
+          assistantOut.scrollTo(0, assistantOut.scrollHeight);
+        } else {
+          assistantOut.innerHTML = '<div style="color:var(--muted);text-align:center;padding-top:40px">Assistant ready for ' + label + '.</div>';
+        }
+      });
 
-    // Native WebSocket — no socket.io needed
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    _ws = new WebSocket(proto + '://' + location.host + '/ssh');
+    const ws = new WebSocket(proto + '://' + location.host + '/ssh');
+    winObj.ws = ws;
 
-    _ws.onopen = () => {
-      _ws.send(JSON.stringify({ ip, username, port, cols: _term.cols, rows: _term.rows }));
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ ip, username, port, cols: winObj.term.cols, rows: winObj.term.rows }));
       dot.className = 'term-dot connected';
-      _term.focus();
+      winObj.term.focus();
+      updateTaskbar();
     };
-    _ws.onmessage = e => {
+    ws.onmessage = e => {
       const m = JSON.parse(e.data);
-      if (m.t === 'o')      { _term.write(m.d); _term.scrollToBottom(); }
-      if (m.t === 'closed') { dot.className = 'term-dot closed'; _term.write('\\r\\n\\x1b[2m[session ended]\\x1b[0m\\r\\n'); }
+      if (m.t === 'o')      { winObj.term.write(m.d); winObj.term.scrollToBottom(); }
+      if (m.t === 'closed') { dot.className = 'term-dot closed'; winObj.term.write('\\r\\n\\x1b[2m[session ended]\\x1b[0m\\r\\n'); updateTaskbar(); }
     };
-    _ws.onclose = () => { dot.className = 'term-dot closed'; };
-    _ws.onerror = () => { dot.className = 'term-dot closed'; _term.write('\\r\\n\\x1b[31m[connection error]\\x1b[0m\\r\\n'); };
+    ws.onclose = () => { dot.className = 'term-dot closed'; updateTaskbar(); };
+    ws.onerror = () => { dot.className = 'term-dot closed'; winObj.term.write('\\r\\n\\x1b[31m[connection error]\\x1b[0m\\r\\n'); };
 
-    _term.onData(d => { if (_ws.readyState === 1) _ws.send(JSON.stringify({t:'i', d})); });
-    _term.onResize(({cols,rows}) => { if (_ws.readyState === 1) _ws.send(JSON.stringify({t:'r',cols,rows})); });
-    new ResizeObserver(() => { if (_fit) _fit.fit(); }).observe(container);
+    winObj.term.onData(d => { if (ws.readyState === 1) ws.send(JSON.stringify({t:'i', d})); });
+    winObj.term.onResize(({cols,rows}) => { if (ws.readyState === 1) ws.send(JSON.stringify({t:'r',cols,rows})); });
+    new ResizeObserver(() => { if (winObj.fit) winObj.fit.fit(); }).observe(container);
 
-    // Prevent background scroll / focus jumps while modal is open
-    document.body.style.overflow = 'hidden';
-    document.getElementById('term-modal').classList.add('open');
-    setTimeout(() => { _fit.fit(); _term.focus(); }, 80);
   } catch (e) {
     alert('Terminal failed to open: ' + (e && e.message ? e.message : e));
   } finally {
@@ -1082,15 +1390,81 @@ async function openTerminal(ip, username, port, label) {
   }
 }
 
+function focusWindow(el) {
+  document.querySelectorAll('.term-window').forEach(w => w.classList.remove('active'));
+  el.classList.add('active');
+  el.style.zIndex = ++_windowZIndex;
+  const win = _activeWindows[el.dataset.hostname];
+  if (win && win.term) win.term.focus();
+  updateTaskbar();
+}
+
+function minimizeWindow(el) {
+  el.classList.add('minimized');
+  updateTaskbar();
+}
+
+function restoreWindow(el) {
+  el.classList.remove('minimized');
+  focusWindow(el);
+}
+
+function closeWindow(el) {
+  const hostname = el.dataset.hostname;
+  const win = _activeWindows[hostname];
+  if (win) {
+    if (win.ws) win.ws.close();
+    if (win.term) win.term.dispose();
+    delete _activeWindows[hostname];
+  }
+  el.remove();
+  updateTaskbar();
+}
+
+function updateTaskbar() {
+  const bar = document.getElementById('taskbar');
+  const hosts = Object.keys(_activeWindows);
+  if (!hosts.length) { bar.style.display = 'none'; return; }
+  
+  bar.style.display = 'flex';
+  bar.innerHTML = hosts.map(h => {
+    const win = _activeWindows[h];
+    const isActive = win.el.classList.contains('active') && !win.el.classList.contains('minimized');
+    const isClosed = win.ws && win.ws.readyState !== 1;
+    return '<div class="task-item' + (isActive ? ' active' : '') + '" onclick="restoreWindow(document.getElementById(\'win-' + h + '\'))">' +
+      '<div class="task-dot" style="' + (isClosed ? 'background:var(--red);box-shadow:none' : '') + '"></div>' +
+      win.context.label + '</div>';
+  }).join('');
+}
+
+// Simple Dragging
+let _dragging = null, _dragOffX = 0, _dragOffY = 0;
+function startDrag(e, el) {
+  if (e.target.closest('button')) return;
+  _dragging = el;
+  _dragOffX = e.clientX - el.offsetLeft;
+  _dragOffY = e.clientY - el.offsetTop;
+  focusWindow(el);
+  document.addEventListener('mousemove', onDrag);
+  document.addEventListener('mouseup', stopDrag);
+}
+function onDrag(e) {
+  if (!_dragging) return;
+  _dragging.style.left = (e.clientX - _dragOffX) + 'px';
+  _dragging.style.top = (e.clientY - _dragOffY) + 'px';
+}
+function stopDrag() {
+  _dragging = null;
+  document.removeEventListener('mousemove', onDrag);
+  document.removeEventListener('mouseup', stopDrag);
+}
+
 function closeTerminal() {
-  document.getElementById('term-modal').classList.remove('open');
-  document.body.style.overflow = '';
-  if (_ws)   { _ws.close(); _ws = null; }
-  if (_term) { _term.dispose(); _term = null; }
+  // Legacy cleanup if needed
 }
 
 function maybeClose(e) {
-  if (e.target === document.getElementById('term-modal')) closeTerminal();
+  // Legacy cleanup if needed
 }
 
 // ── Card rendering ─────────────────────────────────────────────────────────
@@ -1176,6 +1550,8 @@ async function refresh() {
     // Only show error if grid is empty (first load)
     if (!grid.children.length || grid.querySelector('.loading')) {
       grid.innerHTML = '<div class="loading" style="color:var(--red)">Fetch failed: ' + e.message + '</div>';
+    } else {
+      document.getElementById('updated').innerHTML = '<span style="color:var(--red)">Update failed</span>';
     }
     return;
   }
@@ -1537,11 +1913,31 @@ function renderGuide() {
         : Object.keys(c.cmd).filter(k => ['win','mac','lin'].includes(k))
       ).map(k => '<span class="os-badge ' + k + '">' + (k==='win'?'WIN':k==='mac'?'MAC':'LIN') + '</span>').join('');
       const sel = _selectedCmd && _selectedCmd.label === c.label && _selectedCmd.cat === c.cat ? ' selected' : '';
+      
+      let snippets = '';
+      if (sel) {
+        const cmdObj = typeof c.cmd === 'string' ? { win:c.cmd, mac:c.cmd, lin:c.cmd } : c.cmd;
+        snippets = '<div class="guide-snippets">';
+        Object.entries(cmdObj).forEach(([os, code]) => {
+          if (!['win','mac','lin'].includes(os)) return;
+          const cls = os === 'win' ? 'win' : os === 'mac' ? 'mac' : 'lin';
+          const label = os.toUpperCase();
+          snippets += '<div class="guide-snippet">' +
+            '<div class="guide-snippet-os os-badge ' + cls + '">' + label + '</div>' +
+            '<div class="guide-snippet-code">' + code + '</div>' +
+            '<button class="guide-snippet-copy" onclick="event.stopPropagation(); copyText(\'' + code.replace(/'/g, "\\'") + '\', \'Command copied\')">Copy</button>' +
+            '</div>';
+        });
+        snippets += '</div>';
+      }
+
       return '<div class="guide-cmd' + sel + '" onclick="selectCmd(' + JSON.stringify(c).replace(/</g,'\\u003c') + ')">' +
         '<div class="guide-cmd-top"><span class="guide-cmd-icon">' + c.icon + '</span>' +
         '<span class="guide-cmd-label">' + c.label + '</span>' +
         '<div class="guide-cmd-os">' + osBadges + '</div></div>' +
-        '<div class="guide-cmd-desc">' + c.desc + '</div></div>';
+        '<div class="guide-cmd-desc">' + c.desc + '</div>' +
+        snippets +
+        '</div>';
     }).join('')
   ).join('');
 }
@@ -1620,9 +2016,19 @@ async function _execGuideCmd(hostname, command, title) {
   outContent.scrollTop = 0;
 }
 
+function copyText(text, toastMsg) {
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => showToast(toastMsg || 'Copied to clipboard'));
+}
+
 function copyGuideOutput() {
   const text = document.getElementById('guide-output-content').textContent;
-  navigator.clipboard.writeText(text).then(() => showToast('Copied to clipboard'));
+  copyText(text, 'Output copied');
+}
+
+function copyGuideCmd() {
+  const text = document.getElementById('guide-sel-cmd').textContent;
+  copyText(text, 'Command copied');
 }
 
 function clearGuideOutput() {

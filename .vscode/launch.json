@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+
+    {
+      "name": "Start Dashboard",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/dashboard.py",
+      "console": "integratedTerminal",
+      "env": { "PORT": "5555" },
+      "justMyCode": true
+    }
+  ]
+}

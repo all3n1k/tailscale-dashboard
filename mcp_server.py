@@ -13,21 +13,28 @@ import os
 import time
 from datetime import datetime, timezone
 
-# ─── SSH user mapping (must match dashboard.py) ───────────────────────────────
-SSH_USERS = {
-    "neo-mac":      "neo",
-    "digitalstorm": "ALLEN",
-    "neo":          "allen",
-    "michellepc":   "michelle",
-    "a-pad":        "allen",
-}
-SSH_DEFAULT_USER = "neo"
-SSH_TIMEOUT      = 30   # seconds per remote command
+# ─── Configuration ────────────────────────────────────────────────────────────
 
-# Some peers (e.g. Termux sshd) run SSH on a non-22 port.
-SSH_PORTS = {
-    "galaxy-tab-a7-lite": 8022,
-}
+def load_config():
+    base = {
+        "SSH_USERS": {},
+        "SSH_PORTS": {},
+        "SSH_DEFAULT_USER": "neo"
+    }
+    config_path = os.path.join(os.path.dirname(__file__), "config.json")
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                base.update(json.load(f))
+    except Exception:
+        pass
+    return base
+
+CONFIG = load_config()
+SSH_USERS        = CONFIG["SSH_USERS"]
+SSH_DEFAULT_USER = CONFIG["SSH_DEFAULT_USER"]
+SSH_PORTS        = CONFIG["SSH_PORTS"]
+SSH_TIMEOUT      = 30   # seconds per remote command
 
 # ─── Tailscale status cache ───────────────────────────────────────────────────
 _TS_TTL    = 3  # seconds
