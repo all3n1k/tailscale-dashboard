@@ -10,7 +10,23 @@ import socket
 import struct
 import threading
 import time
+import signal
+import sqlite3
 from datetime import datetime, timezone
+
+# ─── Database Initialization ──────────────────────────────────────────────────
+
+def init_db():
+    db_path = "history.db"
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS history (hostname TEXT, role TEXT, content TEXT, timestamp REAL)")
+    c.execute("CREATE TABLE IF NOT EXISTS brain_history (role TEXT, content TEXT, timestamp REAL)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_history_host ON history(hostname)")
+    conn.commit()
+    conn.close()
+
+init_db()
 
 _IS_WINDOWS = sys.platform == "win32"
 if not _IS_WINDOWS:
@@ -127,7 +143,8 @@ def load_config():
         "SSH_PORTS": {},
         "SSH_DEFAULT_USER": "neo",
         "DEVICE_MACS": {},
-        "OLLAMA_HOST": "localhost"
+        "OLLAMA_HOST": "localhost",
+        "DEEPSEEK_API_KEY": ""
     }
     try:
         if os.path.exists("config.json"):
@@ -138,12 +155,13 @@ def load_config():
     return base
 
 CONFIG = load_config()
-DEVICE_INFO      = CONFIG["DEVICE_INFO"]
-SSH_USERS        = CONFIG["SSH_USERS"]
-SSH_PORTS        = CONFIG["SSH_PORTS"]
-SSH_DEFAULT_USER = CONFIG["SSH_DEFAULT_USER"]
-DEVICE_MACS      = CONFIG["DEVICE_MACS"]
-OLLAMA_HOST      = CONFIG["OLLAMA_HOST"]
+DEVICE_INFO       = CONFIG["DEVICE_INFO"]
+SSH_USERS         = CONFIG["SSH_USERS"]
+SSH_PORTS         = CONFIG["SSH_PORTS"]
+SSH_DEFAULT_USER  = CONFIG["SSH_DEFAULT_USER"]
+DEVICE_MACS       = CONFIG["DEVICE_MACS"]
+OLLAMA_HOST       = CONFIG["OLLAMA_HOST"]
+DEEPSEEK_API_KEY  = CONFIG["DEEPSEEK_API_KEY"]
 
 OS_ICONS = {
     "macOS":   "apple",
@@ -231,8 +249,11 @@ def _ssh_ws_pty(ws, ip, username, port, cols, rows):
             # Prevent potential busy-looping if select/receive state is jittery
             time.sleep(0.01)
     finally:
-        try: proc.terminate()
-        except Exception: pass
+        try: 
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception: 
+            try: proc.terminate()
+            except Exception: pass
         try: os.close(master)
         except OSError: pass
 
@@ -587,14 +608,15 @@ def assistant():
     user = context.get("user", "unknown")
     
     system_msg = (
-        f"You are a helpful CLI assistant. The user is in a terminal on {hostname} ({target_os}) as {user}.\n"
+        f"You are a highly skilled CLI assistant and technical guide. The user is in a terminal on {hostname} ({target_os}) as {user}.\n"
+        f"The user is technically proficient and has over a decade of experience 'fiddling' with systems, but is not a professional programmer. "
         f"Provide clear, copy-pastable commands in markdown blocks.\n"
-        f"ABSOLUTE POWER: You can also EXECUTE commands yourself to help the user. "
-        f"If you need to see the output of a command to answer better (like checking disk space, processes, or file contents), "
-        f"wrap the command in <exec> tags. Example: <exec>ls -la</exec>\n"
-        f"The output will be fed back to you automatically. Use this to be proactive.\n"
+        f"When providing commands, give thorough but efficient explanations of what each flag and argument does. "
+        f"If errors occur, explain them in plain but technical language and suggest logical debugging steps.\n"
+        f"ABSOLUTE POWER: You can EXECUTE commands yourself using <exec>shell command</exec> tags. "
+        f"Use this proactively to gather system info (disk space, processes, etc.) if it helps you provide a better, more verified answer.\n"
         f"If the OS is Windows, use PowerShell. Otherwise use bash/zsh.\n"
-        f"Keep explanations brief."
+        f"Be thorough and educational, but avoid unnecessary fluff to conserve tokens and time."
     )
     
     # Construct prompt from history
@@ -631,19 +653,30 @@ def assistant():
         return jsonify({"error": f"Ollama error on digitalstorm: {str(e)}"}), 500
 
 
-import sqlite3
+@app.route("/api/brain/health", methods=["GET"])
+def brain_health():
+    # Quick health check for DigitalStorm (where Ollama runs)
+    try:
+        # Get VRAM usage specifically
+        r = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=4", f"ALLEN@{OLLAMA_HOST}", 
+             "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10
+        )
+        if r.returncode == 0:
+            used, total = r.stdout.strip().split(",")
+            pct = round((int(used) / int(total)) * 100, 1)
+            return jsonify({"vram_pct": pct, "vram_used": int(used), "vram_total": int(total), "online": True})
+    except Exception:
+        pass
+    return jsonify({"online": False})
 
 @app.route("/api/history/<hostname>", methods=["GET"])
 def get_history(hostname):
-    # We use a local sqlite DB for simplicity, but the user asked for it on digitalstorm.
-    # To avoid complex remote sqlite over SSH, I'll store it on the Mac but use 
-    # digitalstorm's IP in the logic if needed. Actually, let's stick to local DB 
-    # for speed, but I will name it 'digitalstorm_sync.db' to honor the intent.
     db_path = "history.db"
     try:
         conn = sqlite3.connect(db_path)
         c = conn.cursor()
-        c.execute("CREATE TABLE IF NOT EXISTS history (hostname TEXT, role TEXT, content TEXT, timestamp REAL)")
         # Auto-delete older than 3 days
         three_days_ago = time.time() - (3 * 24 * 3600)
         c.execute("DELETE FROM history WHERE timestamp < ?", (three_days_ago,))
@@ -665,13 +698,145 @@ def save_history(hostname):
     try:
         conn = sqlite3.connect(db_path)
         c = conn.cursor()
-        c.execute("CREATE TABLE IF NOT EXISTS history (hostname TEXT, role TEXT, content TEXT, timestamp REAL)")
         c.execute("INSERT INTO history VALUES (?, ?, ?, ?)", (hostname.lower(), role, content, time.time()))
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/history/<hostname>/clear", methods=["POST"])
+def clear_history(hostname):
+    db_path = "history.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("DELETE FROM history WHERE hostname = ?", (hostname.lower(),))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/history/brain", methods=["GET"])
+def get_brain_history():
+    db_path = "history.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        # Auto-delete older than 7 days for the brain
+        seven_days_ago = time.time() - (7 * 24 * 3600)
+        c.execute("DELETE FROM brain_history WHERE timestamp < ?", (seven_days_ago,))
+        conn.commit()
+        
+        c.execute("SELECT role, content FROM brain_history ORDER BY timestamp ASC")
+        rows = c.fetchall()
+        conn.close()
+        return jsonify({"history": [{"role": r[0], "content": r[1]} for r in rows]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/history/brain", methods=["POST"])
+def save_brain_history():
+    data = request.json
+    role = data.get("role")
+    content = data.get("content")
+    db_path = "history.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("INSERT INTO brain_history VALUES (?, ?, ?)", (role, content, time.time()))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/history/brain/clear", methods=["POST"])
+def clear_brain_history():
+    db_path = "history.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("DELETE FROM brain_history")
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/brain", methods=["POST"])
+def brain_api():
+    # Reload config dynamically to pick up API key changes without restart
+    current_config = load_config()
+    api_key = current_config.get("DEEPSEEK_API_KEY")
+    
+    if not api_key:
+        return jsonify({"error": "DEEPSEEK_API_KEY not configured in config.json"}), 400
+        
+    data = request.json
+    messages = data.get("messages", [])
+    
+    ts = _tailscale_status()
+    devices_summary = []
+    for node in [ts.get("Self", {})] + list(ts.get("Peer", {}).values()):
+        dns = node.get("DNSName", "")
+        hostname = dns.split(".")[0].lower() if dns else node.get("HostName", "").lower()
+        devices_summary.append(f"- {hostname}: {node.get('OS', 'unknown')}, Online: {node.get('Online', False)}")
+
+    system_msg = (
+        "You are the Global Brain of a Tailscale mesh network dashboard. "
+        "You coordinate between the user and individual 'Worker' LLMs (Gemma 4) on each machine.\n\n"
+        "Current Network Devices:\n" + "\n".join(devices_summary) + "\n\n"
+        "The user is a highly experienced technical hobbyist with over a decade of hands-on system experience. "
+        "They understand systems deeply but aren't professional programmers. They value thorough, explanatory reasoning over simple commands.\n\n"
+        "YOUR ROLE:\n"
+        "- Reason through requests thoroughly and explain your logic.\n"
+        "- When you orchestrate actions, explain WHY you chose a specific machine or command.\n"
+        "- If a system error occurs, don't just report it; explain what it likely means in a technical context and suggest debugging paths.\n"
+        "- Be thorough and educational, but stay efficient to respect time and tokens.\n\n"
+        "CAPABILITIES:\n"
+        "1. COMMAND WORKER: Delegate a task to a machine's local AI for detailed local reasoning.\n"
+        "   Syntax: <command target='hostname'>Task description</command>\n"
+        "2. DIRECT RUN: Fire off a shell command directly to a target machine.\n"
+        "   Syntax: <run target='hostname'>shell command</run>\n"
+        "3. HUB EXEC: Run a command locally on the Mac hub.\n"
+        "   Syntax: <exec>shell command</exec>"
+    )
+
+    # Convert to DeepSeek/OpenAI format
+    api_msgs = [{"role": "system", "content": system_msg}]
+    for m in messages:
+        api_msgs.append({"role": m["role"], "content": m["content"]})
+
+    try:
+        import urllib.request
+        payload = {
+            "model": "deepseek-v4-pro",
+            "messages": api_msgs,
+            "stream": False,
+            "extra_body": {
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": "high"
+            }
+        }
+        req = urllib.request.Request(
+            "https://api.deepseek.com/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            resp_data = json.loads(resp.read().decode("utf-8"))
+            msg = resp_data["choices"][0]["message"]
+            return jsonify({
+                "response": msg.get("content", ""),
+                "reasoning": msg.get("reasoning_content", "")
+            })
+    except Exception as e:
+        return jsonify({"error": f"DeepSeek API error: {str(e)}"}), 500
 
 @app.route("/")
 def index():
@@ -721,6 +886,53 @@ HTML = r"""<!DOCTYPE html>
   .stat:last-child { border-right: none; }
   .stat-val { font-size: 2rem; font-weight: 800; line-height: 1; letter-spacing: -0.04em; font-variant-numeric: tabular-nums; }
   .stat-label { font-size: 0.6rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.11em; margin-top: 5px; font-weight: 500; }
+
+  .brain-btn {
+    align-self: center; background: rgba(58,130,255,0.08); border: 1px solid rgba(58,130,255,0.2);
+    color: var(--blue); padding: 8px 16px; border-radius: 20px; font-size: 0.68rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.05em; cursor: pointer; transition: all 0.2s;
+    display: flex; align-items: center; gap: 8px; margin-left: auto; margin-right: 32px;
+  }
+  .brain-btn:hover { background: rgba(58,130,255,0.15); border-color: var(--blue); box-shadow: 0 0 15px rgba(58,130,255,0.3); }
+  .brain-btn .spin { width: 12px; height: 12px; margin: 0; }
+
+  .brain-panel {
+    position: fixed; top: 0; right: -480px; width: min(480px, 100vw); height: 100vh;
+    background: rgba(9,13,22,0.98); backdrop-filter: blur(30px);
+    border-left: 1px solid var(--border2); z-index: 5000;
+    display: flex; flex-direction: column; transition: right 0.4s cubic-bezier(0.165,0.84,0.44,1);
+    box-shadow: -20px 0 60px rgba(0,0,0,0.5);
+  }
+  .brain-panel.open { right: 0; }
+  .brain-hdr { padding: 18px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: rgba(255,255,255,0.02); }
+  .brain-title-wrap { display: flex; flex-direction: column; gap: 4px; }
+  .brain-title { font-size: 0.85rem; font-weight: 800; letter-spacing: 0.05em; color: var(--blue); display: flex; align-items: center; gap: 10px; }
+  .brain-vram { font-size: 0.62rem; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .vram-bar { width: 60px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .vram-fill { height: 100%; background: var(--green); transition: width 0.5s, background 0.5s; }
+  .vram-fill.warning { background: var(--yellow); }
+  .vram-fill.danger { background: var(--red); }
+  .brain-chat { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+  .brain-msg { font-size: 0.82rem; line-height: 1.5; color: #d4d4d4; }
+  .brain-msg.user { color: var(--blue); font-weight: 600; border-left: 2px solid var(--blue); padding-left: 12px; margin-bottom: 4px; }
+  .brain-msg.bot { background: rgba(58,130,255,0.05); padding: 14px; border-radius: 12px; border: 1px solid rgba(58,130,255,0.1); }
+  .brain-msg p { margin-bottom: 12px; }
+  .brain-msg p:last-child { margin-bottom: 0; }
+  .brain-msg ul, .brain-msg ol { margin: 10px 0 10px 20px; }
+  .brain-msg li { margin-bottom: 4px; }
+  .brain-msg pre { background: #000; padding: 12px; border-radius: 8px; margin: 10px 0; border: 1px solid var(--border); overflow-x: auto; position: relative; }
+  .brain-msg code { font-family: 'SF Mono', monospace; color: var(--cyan); font-size: 0.75rem; }
+  
+  .reasoning-block { 
+    font-size: 0.72rem; color: var(--muted); border: 1px dashed var(--border2); 
+    border-radius: 8px; padding: 10px; margin-bottom: 12px; font-style: italic;
+    background: rgba(255,255,255,0.02);
+  }
+  .reasoning-block summary { cursor: pointer; user-select: none; font-weight: 600; margin-bottom: 6px; }
+  .reasoning-content { opacity: 0.8; }
+  .brain-input-wrap { padding: 20px 24px 30px; border-top: 1px solid var(--border); display: flex; gap: 12px; background: rgba(0,0,0,0.2); }
+  .brain-input { flex: 1; background: rgba(255,255,255,0.05); border: 1px solid var(--border2); color: var(--text); padding: 12px 16px; border-radius: 12px; font-size: 0.82rem; font-family: inherit; }
+  .brain-input:focus { outline: none; border-color: var(--blue); }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; padding: 24px 32px; }
 
@@ -827,6 +1039,21 @@ HTML = r"""<!DOCTYPE html>
     flex-direction: column; 
     background: rgba(255,255,255,0.01); 
   }
+  .assistant-header {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(255,255,255,0.02);
+  }
+  .assistant-title { font-size: 0.62rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+  .assistant-clear {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 0.62rem; padding: 2px 6px; border-radius: 4px;
+    transition: all 0.15s;
+  }
+  .assistant-clear:hover { color: var(--red); background: rgba(239,68,68,0.1); }
   .assistant-output { 
     flex: 1; 
     overflow-y: auto; 
@@ -1039,10 +1266,40 @@ HTML = r"""<!DOCTYPE html>
   <div class="stat"><div class="stat-val" style="color:var(--green)" id="s-online">—</div><div class="stat-label">Online</div></div>
   <div class="stat"><div class="stat-val" style="color:var(--muted)" id="s-offline">—</div><div class="stat-label">Offline</div></div>
   <div class="stat"><div class="stat-val" style="color:var(--blue)" id="s-latency">—</div><div class="stat-label">Avg Latency</div></div>
+  <button class="brain-btn" id="brain-toggle" onclick="openBrain()">
+    <span id="brain-icon">🧠</span> Global Brain
+  </button>
 </div>
 
 <div class="grid" id="grid">
   <div class="loading"><span class="spin"></span>Polling devices…</div>
+</div>
+
+<!-- Global Brain Panel -->
+<div class="brain-panel" id="brain-panel">
+  <div class="brain-hdr">
+    <div class="brain-title-wrap">
+      <div class="brain-title">🧠 DeepSeek V4 Pro <span style="font-size:0.6rem; background:rgba(58,130,255,0.2); padding:2px 6px; border-radius:10px">MAIN BRAIN</span></div>
+      <div class="brain-vram" id="brain-vram">
+        <span>Ollama: Offline</span>
+        <div class="vram-bar"><div class="vram-fill" style="width:0%"></div></div>
+      </div>
+    </div>
+    <div style="display:flex; gap:8px">
+      <button class="assistant-clear" onclick="clearBrainHistory()">Clear</button>
+      <button class="term-close" onclick="closeBrain()">✕</button>
+    </div>
+  </div>
+  <div class="brain-chat" id="brain-chat">
+    <div style="color:var(--muted); text-align:center; padding-top:60px">
+      The Global Brain is ready.<br>Ask to coordinate tasks across your network.
+    </div>
+  </div>
+  <div class="brain-input-wrap">
+    <input type="text" class="brain-input" id="brain-input" placeholder="Give reasoning or instructions..." 
+           onkeydown="if(event.key==='Enter')askBrain()">
+    <button class="m-ctrl" onclick="askBrain()" style="width:60px; margin:0">Send</button>
+  </div>
 </div>
 
 <!-- Guide overlay + panel -->
@@ -1150,6 +1407,10 @@ HTML = r"""<!DOCTYPE html>
     <div class="term-main-layout">
       <div class="term-container"></div>
       <div class="term-assistant">
+        <div class="assistant-header">
+          <span class="assistant-title">AI Assistant</span>
+          <button class="assistant-clear" onclick="clearAssistantHistory(this.closest('.term-window'))">Clear Chat</button>
+        </div>
         <div class="assistant-output">
           <div style="color:var(--muted);text-align:center;padding-top:40px">
             Assistant ready. Ask for commands or tips.
@@ -1245,11 +1506,7 @@ async function askAssistant(winEl, customPrompt = null) {
       return askAssistant(winEl, "Continue based on the command output.");
     }
 
-    let html = d.response.replace(/```(?:[a-z]*\n)?([\\s\\S]*?)```/g, (m, code) => {
-      const clean = code.trim();
-      return '<pre><code>' + clean + '</code><button class="copy-btn" onclick="copyToAssistant(this)">Copy</button></pre>';
-    });
-    botMsg.innerHTML = html;
+    botMsg.innerHTML = marked.parse(d.response);
   } catch (e) {
     botMsg.innerHTML = '<span style="color:var(--red)">Error: ' + e.message + '</span>';
   }
@@ -1257,11 +1514,29 @@ async function askAssistant(winEl, customPrompt = null) {
 }
 
 function copyToAssistant(btn) {
+  // Legacy support for older manual buttons if any remain
   const code = btn.previousElementSibling.textContent;
-  navigator.clipboard.writeText(code);
-  const old = btn.textContent;
-  btn.textContent = 'Copied!';
-  setTimeout(() => btn.textContent = old, 2000);
+  copyText(code, 'Command copied');
+}
+
+async function clearAssistantHistory(winEl) {
+  const hostname = winEl.dataset.hostname;
+  const win = _activeWindows[hostname];
+  if (!win) return;
+  if (!confirm('Clear chat history for ' + win.context.label + '?')) return;
+
+  try {
+    const r = await fetch('/api/history/' + hostname + '/clear', { method: 'POST' });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    
+    win.history = [];
+    const output = winEl.querySelector('.assistant-output');
+    output.innerHTML = '<div style="color:var(--muted);text-align:center;padding-top:40px">Chat cleared. Assistant ready.</div>';
+    showToast('Chat history cleared');
+  } catch (e) {
+    showToast('Failed to clear: ' + e.message, 'err');
+  }
 }
 
 function loadScript(src) {
@@ -1281,6 +1556,19 @@ async function ensureDeps() {
     document.head.appendChild(css);
     await loadScript('https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js');
     await loadScript('https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js');
+    await loadScript('https://cdn.jsdelivr.net/npm/marked/marked.min.js');
+    
+    // Configure marked for copy buttons
+    const renderer = new marked.Renderer();
+    const oldCode = renderer.code.bind(renderer);
+    renderer.code = function(code, infostring, escaped) {
+      const html = oldCode(code, infostring, escaped);
+      if (typeof code === 'object') code = code.text; // marked v11+ support
+      return '<div style="position:relative">' + html + 
+             '<button class="copy-btn" onclick="copyText(this.parentElement.querySelector(\'code\').textContent, \'Command copied\')">Copy</button></div>';
+    };
+    marked.setOptions({ renderer });
+
     _depsLoaded = true;
     return true;
   } catch(e) {
@@ -1356,9 +1644,7 @@ async function openTerminal(ip, username, port, label) {
             if (m.role === 'user') {
               el.textContent = 'Q: ' + m.content;
             } else {
-              el.innerHTML = m.content.replace(/```(?:[a-z]*\n)?([\\s\\S]*?)```/g, (mt, code) => {
-                return '<pre><code>' + code.trim() + '</code><button class="copy-btn" onclick="copyToAssistant(this)">Copy</button></pre>';
-              });
+              el.innerHTML = marked.parse(m.content);
             }
             assistantOut.appendChild(el);
           });
@@ -1876,6 +2162,190 @@ function openGuide() {
   document.getElementById('guide-search').focus();
 }
 
+let _brainHistory = [];
+let _brainPolling = null;
+
+async function openBrain() {
+  const panel = document.getElementById('brain-panel');
+  const overlay = document.getElementById('guide-overlay');
+  panel.classList.add('open');
+  overlay.classList.add('open');
+  
+  if (!await ensureDeps()) return;
+
+  if (!_brainHistory.length) {
+    const chat = document.getElementById('brain-chat');
+    chat.innerHTML = '<div style="color:var(--muted); text-align:center; padding-top:60px"><span class="guide-spinner"></span>Connecting to DeepSeek...</div>';
+    fetch('/api/history/brain')
+      .then(r => r.json())
+      .then(d => {
+        chat.innerHTML = '';
+        if (d.history && d.history.length) {
+          _brainHistory = d.history;
+          d.history.forEach(m => appendBrainMsg(m.role, m.content));
+        } else {
+          chat.innerHTML = '<div style="color:var(--muted); text-align:center; padding-top:60px">The Global Brain is ready.<br>Ask to coordinate tasks across your network.</div>';
+        }
+      });
+  }
+
+  // Poll DigitalStorm VRAM health
+  if (!_brainPolling) {
+    pollBrainHealth();
+    _brainPolling = setInterval(pollBrainHealth, 10000);
+  }
+}
+
+async function pollBrainHealth() {
+  try {
+    const r = await fetch('/api/brain/health');
+    const d = await r.json();
+    const el = document.getElementById('brain-vram');
+    if (d.online) {
+      const cls = d.vram_pct > 90 ? 'danger' : (d.vram_pct > 75 ? 'warning' : '');
+      el.innerHTML = '<span>Ollama: ' + d.vram_pct + '% VRAM (' + Math.round(d.vram_used/1024) + 'GB)</span>' +
+                     '<div class="vram-bar"><div class="vram-fill ' + cls + '" style="width:' + d.vram_pct + '%"></div></div>';
+    } else {
+      el.innerHTML = '<span>Ollama: Offline</span><div class="vram-bar"><div class="vram-fill" style="width:0%"></div></div>';
+    }
+  } catch(e) {}
+}
+
+function closeBrain() {
+  document.getElementById('brain-panel').classList.remove('open');
+  document.getElementById('guide-overlay').classList.remove('open');
+  if (_brainPolling) { clearInterval(_brainPolling); _brainPolling = null; }
+}
+
+async function askBrain(customPrompt = null, depth = 0) {
+  if (depth > 5) {
+    appendBrainMsg('bot', '<span style="color:var(--red)">Error: Recursion limit reached. Stopping autonomous loop to save tokens.</span>');
+    return;
+  }
+  if (!await ensureDeps()) return;
+  const input = document.getElementById('brain-input');
+  const chat = document.getElementById('brain-chat');
+  const prompt = customPrompt || input.value.trim();
+  if (!prompt) return;
+
+  if (!customPrompt) {
+    input.value = '';
+    appendBrainMsg('user', prompt);
+    _brainHistory.push({ role: 'user', content: prompt });
+    fetch('/api/history/brain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: 'user', content: prompt }) });
+  }
+
+  const botMsg = appendBrainMsg('bot', '<span class="guide-spinner"></span>Thinking...');
+  chat.scrollTo(0, chat.scrollHeight);
+
+  try {
+    const r = await fetch('/api/brain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: _brainHistory }) });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+
+    _brainHistory.push({ role: 'assistant', content: d.response });
+    fetch('/api/history/brain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: 'assistant', content: d.response }) });
+
+    // --- AGENTIC WAITER LOOP ---
+    const commandRegex = /<command target=['"](.*?)['"]>([\\s\\S]*?)<\/command>/g;
+    const runRegex     = /<run target=['"](.*?)['"]>([\\s\\S]*?)<\/run>/g;
+    const execRegex    = /<exec>([\\s\\S]*?)<\/exec>/g;
+
+    let tasks = [];
+    let match;
+
+    while ((match = commandRegex.exec(d.response)) !== null) {
+      const target = match[1], task = match[2];
+      tasks.push((async () => {
+        const res = await fetch('/api/assistant', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: [{role:'user', content: task}], context: {hostname: target, os: 'unknown', user: 'neo'} })
+        });
+        const rd = await res.json();
+        return 'WORKER RESULT (' + target + '): ' + rd.response;
+      })());
+    }
+
+    while ((match = runRegex.exec(d.response)) !== null) {
+      const target = match[1], cmd = match[2].trim();
+      tasks.push((async () => {
+        const res = await fetch('/api/run', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hostname: target, command: cmd })
+        });
+        const rd = await res.json();
+        return 'DIRECT RUN RESULT (' + target + '):\\n' + (rd.output || rd.error);
+      })());
+    }
+
+    while ((match = execRegex.exec(d.response)) !== null) {
+      const cmd = match[1].trim();
+      tasks.push((async () => {
+        const res = await fetch('/api/run', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hostname: 'neo-mac', command: cmd })
+        });
+        const rd = await res.json();
+        return 'HUB EXEC RESULT: ' + (rd.output || rd.error);
+      })());
+    }
+
+    if (tasks.length > 0) {
+      botMsg.innerHTML = '<span class="guide-spinner"></span>Executing ' + tasks.length + ' tasks across network...';
+      const results = await Promise.all(tasks);
+      const combinedResults = 'SYSTEM: Parallel tasks complete.\\n\\n' + results.join('\\n\\n---\\n\\n');
+      _brainHistory.push({ role: 'user', content: combinedResults });
+      botMsg.remove();
+      return askBrain("Commands finished. Analyze these results and provide the final report to the user.", depth + 1);
+    }
+
+    // Render reasoning if available
+    let html = '';
+    if (d.reasoning) {
+      html += '<details class="reasoning-block"><summary>Reasoning Process</summary><div class="reasoning-content">' + 
+              marked.parse(d.reasoning) + '</div></details>';
+    }
+    html += marked.parse(d.response);
+    botMsg.innerHTML = html;
+  } catch (e) {
+    botMsg.innerHTML = '<span style="color:var(--red)">Brain Error: ' + e.message + '</span>';
+  }
+  chat.scrollTo(0, chat.scrollHeight);
+}
+
+function appendBrainMsg(role, content) {
+  const chat = document.getElementById('brain-chat');
+  if (chat.querySelector('div[style*="text-align:center"]')) chat.innerHTML = '';
+  const el = document.createElement('div');
+  el.className = 'brain-msg ' + (role === 'user' ? 'user' : 'bot');
+  
+  if (role === 'user') {
+    el.textContent = content;
+  } else {
+    // If it's a simple loading message, just set it
+    if (content.includes('guide-spinner')) {
+      el.innerHTML = content;
+    } else if (typeof marked !== 'undefined') {
+      el.innerHTML = marked.parse(content);
+    } else {
+      // Fallback if marked is still loading
+      el.textContent = content;
+      el.style.whiteSpace = 'pre-wrap';
+    }
+  }
+  
+  chat.appendChild(el);
+  chat.scrollTo(0, chat.scrollHeight);
+  return el;
+}
+
+async function clearBrainHistory() {
+  if (!confirm('Reset the Global Brain?')) return;
+  await fetch('/api/history/brain/clear', { method: 'POST' });
+  _brainHistory = [];
+  document.getElementById('brain-chat').innerHTML = '<div style="color:var(--muted); text-align:center; padding-top:60px">Brain cleared.</div>';
+}
+
 function closeGuide() {
   document.getElementById('guide-panel').classList.remove('open');
   document.getElementById('guide-overlay').classList.remove('open');
@@ -1919,8 +2389,9 @@ function renderGuide() {
         ? ['win','mac','lin']
         : Object.keys(c.cmd).filter(k => ['win','mac','lin'].includes(k))
       ).map(k => '<span class="os-badge ' + k + '">' + (k==='win'?'WIN':k==='mac'?'MAC':'LIN') + '</span>').join('');
+
       const sel = _selectedCmd && _selectedCmd.label === c.label && _selectedCmd.cat === c.cat ? ' selected' : '';
-      
+
       let snippets = '';
       if (sel) {
         const cmdObj = typeof c.cmd === 'string' ? { win:c.cmd, mac:c.cmd, lin:c.cmd } : c.cmd;
@@ -1932,13 +2403,13 @@ function renderGuide() {
           snippets += '<div class="guide-snippet">' +
             '<div class="guide-snippet-os os-badge ' + cls + '">' + label + '</div>' +
             '<div class="guide-snippet-code">' + code + '</div>' +
-            '<button class="guide-snippet-copy" onclick="event.stopPropagation(); copyText(\'' + code.replace(/'/g, "\\'") + '\', \'Command copied\')">Copy</button>' +
+            '<button class="guide-snippet-copy" onclick="event.stopPropagation(); copyText(\\x27' + code.replace(/'/g, "\\\\'") + '\\x27, \\x27Command copied\\x27)">Copy</button>' +
             '</div>';
         });
         snippets += '</div>';
       }
 
-      return '<div class="guide-cmd' + sel + '" onclick="selectCmd(' + JSON.stringify(c).replace(/</g,'\\u003c') + ')">' +
+      return '<div class="guide-cmd' + sel + '" onclick="selectCmd(' + JSON.stringify(c).replace(/</g,'\\\\u003c') + ')">' +
         '<div class="guide-cmd-top"><span class="guide-cmd-icon">' + c.icon + '</span>' +
         '<span class="guide-cmd-label">' + c.label + '</span>' +
         '<div class="guide-cmd-os">' + osBadges + '</div></div>' +
@@ -1947,7 +2418,22 @@ function renderGuide() {
         '</div>';
     }).join('')
   ).join('');
-}
+  }
+
+  // ── Shortcuts ──────────────────────────────────────────────────────────────
+  window.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    closeGuide();
+    closeBrain();
+    closeMirror();
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    e.preventDefault();
+    if (document.getElementById('brain-panel').classList.contains('open')) closeBrain();
+    else openBrain();
+  }
+  });
+
 
 function selectCmd(c) {
   _selectedCmd = c;

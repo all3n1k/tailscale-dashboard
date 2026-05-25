@@ -17,5 +17,6 @@
     "DEVICE_MACS": {
         "example-host": "00:11:22:33:44:55"
     },
-    "OLLAMA_HOST": "localhost"
+    "OLLAMA_HOST": "localhost",
+    "DEEPSEEK_API_KEY": "sk-your-key-here"
 }
