@@ -1,272 +1,79 @@
 # Tailnet Dashboard
 
-A self-hosted web dashboard for monitoring and controlling a personal Tailscale mesh network. Runs as a single-file Flask server — no build step, no database, no container required.
+A self-hosted Flask dashboard for a personal Tailscale network. It shows device
+status, opens browser SSH terminals, runs remote commands, and provides
+Wake-on-LAN and power controls. An optional stdio MCP server exposes device
+listing and command execution to compatible clients.
 
-Live at `http://localhost:5555` on the always-on hub machine.
-
----
-
-## Features
-
-- **Real-time device grid** — online/offline status, latency, OS icons, rx/tx bytes, connection type (direct vs relay)
-- **Soft refresh** — polls every 15 seconds; only re-renders cards whose data changed (no flash, no focus loss)
-- **WebSocket SSH terminal** — full xterm.js terminal in the browser; PTY-based on Unix, paramiko channel on Windows
-- **Wake-on-LAN** — magic packet to wake offline machines (one click, no config)
-- **Remote power controls** — shutdown and restart any machine over SSH with confirmation dialog
-- **Command library** — searchable, categorized SSH command palette with per-machine output panel
-- **iPhone Mirroring control** — screenshot + tap/swipe/type via Mirroir MCP (macOS only)
-- **Cross-platform launchers** — `start.command` (macOS) and `start.bat` (Windows) handle deps + start + browser open in one click
-- **MCP server** — `mcp_server.py` exposes the tailnet as callable tools to compatible MCP clients
-
----
-
-## Network Topology
-
-Configure your devices in `dashboard.py` by editing `DEVICE_INFO`, `SSH_USERS`, `SSH_PORTS`, and `DEVICE_MACS`. Example layout:
-
-| Hostname | Label | OS | SSH User | SSH Port | Category |
-|---|---|---|---|---|---|
-| my-mac | MacBook Air | macOS | alice | 22 | laptop |
-| desktop-1 | Gaming PC | Windows | alice | 22 | desktop |
-| desktop-2 | Office PC | Windows | bob | 22 | desktop |
-| android-tab | Galaxy Tab | Android | user | 8022 | tablet |
-| server-1 | Home Server | Windows | admin | 22 | desktop |
-
-## Hardware Specs
-
-Add your machine specs to `DEVICE_INFO[hostname]["specs"]` in `dashboard.py`. These appear on each device card.
-
----
+The dashboard runs as a single Python application. It stores command/chat
+history in a local SQLite database; it does not require a separate database
+service or frontend build.
 
 ## Setup
 
-### Dependencies
+Install Python and Tailscale, sign the host into your tailnet, then:
 
-```bash
-pip install flask flask-sock paramiko
+```sh
+git clone https://github.com/all3n1k/tailscale-dashboard.git
+cd tailscale-dashboard
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp config.json.example config.json
 ```
 
-Or use the requirements file:
+On Windows, activate the environment with `.venv\Scripts\activate`.
+Edit `config.json` with your hostnames, SSH users/ports, display labels, and
+Wake-on-LAN addresses. The populated file and local history database are ignored
+by Git.
 
-```bash
-pip install -r requirements.txt
+Run the dashboard:
+
+```sh
+python3 dashboard.py
 ```
 
-### Running
+Open http://localhost:5555. Set `PORT` to use another port. The repository also
+contains `start.command` and `start.bat` convenience launchers.
 
-**macOS** — double-click `start.command` in Finder, or:
-```bash
-./start.command
+This application can run commands and power off machines. Use it on a trusted
+local network or private tailnet, not as an unauthenticated public web service.
+
+## Capabilities
+
+| Area | Implementation |
+| --- | --- |
+| Device overview | Tailscale status, online/offline state, traffic, connection type and latency |
+| Interactive terminals | Browser WebSocket terminal with a Unix PTY or Windows Paramiko channel |
+| Remote operations | Command palette, SSH execution, restart and shutdown |
+| Wake-on-LAN | Magic packets using configured device MAC addresses |
+| iPhone controls | Optional macOS Mirroring integration through Mirroir MCP |
+| MCP | Device listing, remote command execution, and local command execution |
+
+SSH keys must already be authorized on the target machines.
+[SSH and Wake-on-LAN setup](docs/ssh-setup.md) includes Windows administrator
+key-file details and Termux port configuration.
+
+## MCP server
+
+Run `python3 /absolute/path/to/tailscale-dashboard/mcp_server.py` as the
+stdio command in a compatible MCP client. For example:
+
+```sh
+python3 /absolute/path/to/tailscale-dashboard/mcp_server.py
 ```
 
-**Windows** — double-click `start.bat`, or run in cmd:
-```
-start.bat
-```
+Available tools are `tailnet_list_devices`, `tailnet_run`, and
+`tailnet_run_local`. SSH user/port overrides come from `config.json`.
+Restart the client/server process after changing its code or configuration.
 
-**Manual:**
-```bash
-python3 dashboard.py          # default port 5555
-PORT=8080 python3 dashboard.py  # custom port
-```
+## Source layout
 
-**Background (survives terminal close):**
-```bash
-pkill -f "dashboard.py" 2>/dev/null; sleep 1
-nohup python3 /path/to/tailscale-dashboard/dashboard.py \
-  > /path/to/tailscale-dashboard/dashboard.log 2>&1 &
-```
+- `dashboard.py`: Flask routes, WebSocket terminals, storage, and inline UI.
+- `mcp_server.py`: stdio MCP server.
+- `config.json.example`: configuration template.
+- `requirements.txt`: Python dependencies.
+- [Architecture and API reference](docs/architecture.md).
 
----
-
-## SSH Key Setup
-
-The dashboard SSHs into peers using `~/.ssh/id_ed25519` on the host machine. The public key must be authorized on each peer.
-
-### Windows (administrator accounts)
-The key goes in a special path — NOT `~\.ssh\authorized_keys`:
-```
-C:\ProgramData\ssh\administrators_authorized_keys
-```
-
-Permissions must be restricted to SYSTEM and Administrators only. Use `icacls` via `cmd.exe` with SID syntax (PowerShell's `/` flag parsing breaks):
-```cmd
-cmd /c "icacls C:\ProgramData\ssh\administrators_authorized_keys /inheritance:r /grant *S-1-5-18:F /grant *S-1-5-32-544:F"
-```
-
-If the file is locked after first sshd start, reclaim it with `takeown` first:
-```cmd
-cmd /c "takeown /f C:\ProgramData\ssh\administrators_authorized_keys"
-cmd /c "icacls C:\ProgramData\ssh\administrators_authorized_keys /grant Administrators:F"
-```
-
-### Linux / macOS
-```bash
-~/.ssh/authorized_keys   # standard path, chmod 600
-```
-
-### Android (Termux)
-```bash
-~/.ssh/authorized_keys   # Termux home
-# sshd runs on port 8022 — start with: sshd
-```
-
----
-
-## Wake-on-LAN Setup
-
-Add MAC addresses to `DEVICE_MACS` in `dashboard.py` to enable the WoL button per device:
-
-```python
-DEVICE_MACS = {
-    "my-desktop": "aa:bb:cc:dd:ee:ff",
-    "server-1":   "11:22:33:44:55:66",
-}
-```
-
-Find a MAC address after pinging the device:
-```bash
-arp -a         # macOS / Linux
-arp -a         # Windows (cmd)
-```
-
----
-
-## File Structure
-
-```
-tailscale-dashboard/
-├── dashboard.py       # Everything: Flask app, API routes, WebSocket SSH, HTML/CSS/JS (monolith)
-├── mcp_server.py      # MCP stdio server — exposes tailnet tools to Claude
-├── requirements.txt   # flask, flask-sock, paramiko
-├── start.command      # macOS double-click launcher
-├── start.bat          # Windows double-click launcher
-└── dashboard.log      # Server stdout (nohup output, gitignored)
-```
-
----
-
-## Architecture
-
-### Python Layer (`dashboard.py`)
-
-**Tailscale status cache** (`_tailscale_status`)
-Runs `tailscale status --json` and caches the result for 3 seconds. Prevents redundant subprocess spawns when multiple API calls arrive simultaneously (e.g. during parallel ping + status fetch).
-
-**SSH WebSocket endpoint** (`/ssh`)
-- Accepts a WebSocket connection; first message is `{ip, username, port, cols, rows}`
-- **Unix**: opens a PTY with `pty.openpty()`, calls `tty.setraw()` to disable line buffering, spawns `ssh -tt` with stdin/stdout/stderr attached to the PTY master, bridges PTY ↔ WebSocket via `select()`
-- **Windows**: connects via `paramiko.SSHClient.invoke_shell()`, non-blocking channel poll loop
-- Message protocol: `{t:"o", d:"..."}` (output), `{t:"i", d:"..."}` (input), `{t:"r", cols, rows}` (resize), `{t:"closed"}` (session end)
-
-**Ping** (`ping_device`)
-Cross-platform: `ping -c 1 -W 2000` on Unix, `ping -n 1 -w 2000` on Windows. Runs in a `ThreadPoolExecutor` with 12 workers across all online peers simultaneously.
-
-**Wake-on-LAN** (`_send_wol`)
-Sends a 102-byte UDP magic packet (6×`0xFF` + 16× MAC bytes) to `255.255.255.255:9` via a broadcast socket.
-
-**Power control** (`/api/power`)
-Fire-and-forget SSH (`subprocess.Popen`, not `run`) — the connection dying on shutdown is expected. OS-aware commands: `shutdown /s /t 0` / `shutdown /r /t 0` on Windows; `sudo shutdown -h now` / `sudo reboot` on Unix.
-
-**MirroirClient**
-Persistent `npx -y mirroir-mcp` subprocess with a threading lock. Sends JSON-RPC 2.0 `tools/call` requests, handles stale window detection. Module-level singleton.
-
-### Frontend (inline HTML string)
-
-**Tech stack**: Vanilla JS, no frameworks. xterm.js v5.3.0 + xterm-addon-fit loaded lazily from CDN on first Terminal click.
-
-**Design**: Dark navy (`#0A0E17`) base, Inter font, ambient gradient orbs, pill-shaped status indicators with glow dots, glassmorphism modals.
-
-**Soft refresh**:
-```javascript
-function cardHash(d) {
-  return [d.online, d.latency, d.direct, d.relay,
-          d.rx_bytes, d.tx_bytes, d.last_seen, d.last_handshake].join('|');
-}
-// On refresh: compare data-hash on each card; only replaceWith() on changes
-```
-
-**Event delegation**: Terminal, mirror, power, WoL, and command-run buttons are all handled on `#grid` via `.closest()` — buttons survive card re-renders without needing re-binding.
-
----
-
-## API Reference
-
-| Method | Path | Body | Description |
-|---|---|---|---|
-| GET | `/api/status` | — | All devices with latency, bytes, connection info |
-| GET | `/api/mirror/screenshot` | — | Base64 PNG of iPhone screen |
-| POST | `/api/mirror/action` | `{action, ...args}` | Tap, swipe, type, home, launch |
-| POST | `/api/wol` | `{hostname}` | Send Wake-on-LAN magic packet |
-| POST | `/api/power` | `{hostname, action}` | `action`: `"shutdown"` or `"restart"` |
-| POST | `/api/run` | `{hostname, command}` | Run shell command over SSH, return output |
-| WS | `/ssh` | first msg: `{ip, username, port, cols, rows}` | Interactive SSH terminal |
-
-### `/api/status` response shape (per device)
-```json
-{
-  "hostname": "my-laptop",
-  "label": "My Laptop",
-  "specs": "i7 · RTX 3080 · 32GB · Windows",
-  "category": "laptop",
-  "ip": "100.x.x.x",
-  "os": "windows",
-  "online": true,
-  "is_self": false,
-  "direct": true,
-  "relay": "",
-  "latency": 4.2,
-  "rx_bytes": "1.23GB",
-  "tx_bytes": "456.7MB",
-  "last_seen": "just now",
-  "last_handshake": "2m ago",
-  "ssh_user": "alice",
-  "ssh_port": 22,
-  "has_ssh": true,
-  "has_power": true,
-  "has_mirror": false,
-  "mac": ""
-}
-```
-
----
-
-## MCP Server (`mcp_server.py`)
-
-Exposes the tailnet as callable tools for MCP clients.
-
-**Register:**
-```bash
-python3 /path/to/tailscale-dashboard/mcp_server.py  # stdio command for your MCP client
-```
-
-**Tools:**
-
-| Tool | Description |
-|---|---|
-| `tailnet_list_devices` | List all devices with status, IP, OS, relay |
-| `tailnet_run` | SSH into a peer and run a command (30s timeout) |
-| `tailnet_run_local` | Run a command locally on the hub machine |
-
-> Changes to `mcp_server.py` only take effect after restarting the MCP client or killing the process.
-
----
-
-## Known Gaps
-
-- **mcp_server.py SSH ports**: `tailnet_run` always uses port 22 — non-standard ports (e.g. Termux on 8022) unreachable without adding `SSH_PORTS` dict.
-- **dashboard.py modularization**: Still a monolith. Natural split: `config.py`, `routes/`, `templates/`, `mirroir_client.py`.
-
----
-
-## Key Design Decisions
-
-| Decision | Rationale |
-|---|---|
-| PTY-based SSH (Unix) | Zero extra deps, full terminal emulation (resize, colors, interactive programs like `vim`) |
-| paramiko (Windows) | No PTY available on Windows; paramiko is pure Python and handles the same WebSocket protocol |
-| Tailscale status cache (3s TTL) | Prevents redundant `tailscale status --json` CLI spawns on concurrent requests |
-| Soft refresh via `data-hash` | Prevents input focus loss and visual flash on every 15s poll |
-| nohup background process | Keeps server alive across editor restarts and terminal closes |
-| `cmd /c icacls` for Windows ACLs | PowerShell's `/` flag parsing breaks `icacls` — must run through `cmd.exe` |
-| Fire-and-forget SSH for power | SSH connection dies when machine shuts down; `Popen` avoids a hung request |
+The dashboard remains a single-file application; modularization and deployment
+hardening are areas for further work.

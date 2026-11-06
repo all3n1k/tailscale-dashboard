@@ -10,3 +10,6 @@ venv/
 config.json
 history.db
 *.db
+
+# Local development context and working notes
+/.private-notes/
