@@ -77,3 +77,14 @@ Restart the client/server process after changing its code or configuration.
 
 The dashboard remains a single-file application; modularization and deployment
 hardening are areas for further work.
+
+## Dashboard access
+
+The dashboard binds to loopback by default. For access through a private remote
+interface, explicitly set `DASHBOARD_HOST`, `DASHBOARD_ALLOWED_HOSTS` (comma-separated
+request hostnames), and a random `DASHBOARD_TOKEN` of at least 24 characters.
+The browser asks for HTTP Basic credentials; use any username and the token as
+the password. API clients may instead send `Authorization: Bearer <token>`.
+Use a trusted TLS tunnel for remote access. Cross-origin browser requests and
+unrecognized Host headers are rejected, including WebSocket handshakes.
+Keep credentials in local environment/configuration, outside source control.

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import ipaddress
 import subprocess
 import concurrent.futures
 import re
@@ -39,9 +40,33 @@ else:
 
 from flask import Flask, jsonify, request
 from flask_sock import Sock
+from access_control import AccessPolicy
 
 app  = Flask(__name__)
 sock = Sock(app)
+access_policy = AccessPolicy(os.environ)
+app.config['MAX_CONTENT_LENGTH'] = 65536
+
+@app.before_request
+def require_dashboard_access():
+    denied = access_policy.check(request.headers)
+    if not denied and request.is_json and request.method == 'POST' and not isinstance(request.get_json(silent=True), dict):
+        denied = (400, 'A JSON object is required')
+    if denied:
+        status, message = denied
+        response = jsonify({'error': message})
+        response.status_code = status
+        if status == 401:
+            response.headers['WWW-Authenticate'] = 'Basic realm="Dashboard", charset="UTF-8"'
+        return response
+
+@app.after_request
+def private_response(response):
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    return response
+
 
 # ─── Tailscale status cache (avoids duplicate CLI calls within 3 s) ───────────
 _STATUS_TTL   = 3  # seconds
@@ -175,17 +200,31 @@ OS_ICONS = {
 
 @sock.route("/ssh")
 def ssh_ws(ws):
-    # First message: {ip, username, cols, rows}
+    # The browser requests an IP from the displayed Tailnet. Resolve user and
+    # port on the server instead of trusting browser-supplied SSH settings.
     try:
-        init = json.loads(ws.receive(timeout=10))
-    except Exception:
+        raw = ws.receive(timeout=10)
+        if not isinstance(raw, str) or len(raw) > 4096:
+            return
+        init = json.loads(raw)
+        ip = str(ipaddress.ip_address(init["ip"]))
+        status = _tailscale_status()
+        peers = [status.get("Self", {})] + list(status.get("Peer", {}).values())
+        node = next((peer for peer in peers if ip in (peer.get("TailscaleIPs") or [])), None)
+        if node is None:
+            return
+        dns = node.get("DNSName") or node.get("HostName") or ""
+        hostname = dns.split(".")[0].lower()
+        username = SSH_USERS.get(hostname, SSH_DEFAULT_USER)
+        if not re.fullmatch(r"[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63}", username):
+            return
+        port = int(SSH_PORTS.get(hostname, 22))
+        if not 1 <= port <= 65535:
+            return
+        cols = max(1, min(500, int(init.get("cols", 80))))
+        rows = max(1, min(250, int(init.get("rows", 24))))
+    except (TypeError, ValueError, KeyError, AttributeError, RuntimeError, OSError, subprocess.SubprocessError):
         return
-
-    ip       = init.get("ip", "")
-    username = init.get("username", SSH_DEFAULT_USER)
-    port     = int(init.get("port", 22))
-    cols     = int(init.get("cols", 80))
-    rows     = int(init.get("rows", 24))
 
     if _IS_WINDOWS:
         _ssh_ws_paramiko(ws, ip, username, port, cols, rows)
@@ -487,8 +526,10 @@ def mirror_action():
 @app.route("/api/run", methods=["POST"])
 def api_run():
     d        = request.json or {}
-    hostname = d.get("hostname", "").lower()
-    command  = d.get("command", "").strip()
+    hostname, command = d.get("hostname"), d.get("command")
+    if not isinstance(hostname, str) or not isinstance(command, str) or len(command) > 8192:
+        return jsonify({"error": "Invalid hostname or command"}), 400
+    hostname, command = hostname.lower().strip(), command.strip()
 
     if not hostname or not command:
         return jsonify({"error": "hostname and command are required"}), 400
@@ -509,7 +550,7 @@ def api_run():
     port = SSH_PORTS.get(hostname, 22)
 
     # Self — run locally
-    if node.get("DNSName", "").split(".")[0].lower() == ts.get("Self", {}).get("DNSName", "").split(".")[0].lower():
+    if node is ts.get("Self"):
         try:
             r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
             out = (r.stdout + r.stderr).strip() or f"[exit {r.returncode}]"
@@ -1484,7 +1525,8 @@ async function askAssistant(winEl, customPrompt = null) {
     let execMatch = d.response.match(/<exec>([\\s\\S]*?)<\/exec>/);
     if (execMatch) {
       let cmd = execMatch[1].trim();
-      botMsg.innerHTML = '<span class="guide-spinner"></span>Running: <code>' + cmd + '</code>...';
+      if (!window.confirm('Run this command on ' + hostname + '?\\n\\n' + cmd)) { botMsg.textContent = d.response; return; }
+      botMsg.innerHTML = '<span class="guide-spinner"></span>Running: <code>' + escapeText(cmd) + '</code>...';
       
       const res = await fetch('/api/run', {
         method: 'POST',
@@ -1506,11 +1548,15 @@ async function askAssistant(winEl, customPrompt = null) {
       return askAssistant(winEl, "Continue based on the command output.");
     }
 
-    botMsg.innerHTML = marked.parse(d.response);
+    botMsg.innerHTML = escapeText(d.response);
   } catch (e) {
-    botMsg.innerHTML = '<span style="color:var(--red)">Error: ' + e.message + '</span>';
+    botMsg.innerHTML = '<span style="color:var(--red)">Error: ' + escapeText(e.message) + '</span>';
   }
   output.scrollTo(0, output.scrollHeight);
+}
+
+function escapeText(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[ch]));
 }
 
 function copyToAssistant(btn) {
@@ -1556,19 +1602,6 @@ async function ensureDeps() {
     document.head.appendChild(css);
     await loadScript('https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js');
     await loadScript('https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js');
-    await loadScript('https://cdn.jsdelivr.net/npm/marked/marked.min.js');
-    
-    // Configure marked for copy buttons
-    const renderer = new marked.Renderer();
-    const oldCode = renderer.code.bind(renderer);
-    renderer.code = function(code, infostring, escaped) {
-      const html = oldCode(code, infostring, escaped);
-      if (typeof code === 'object') code = code.text; // marked v11+ support
-      return '<div style="position:relative">' + html + 
-             '<button class="copy-btn" onclick="copyText(this.parentElement.querySelector(\'code\').textContent, \'Command copied\')">Copy</button></div>';
-    };
-    marked.setOptions({ renderer });
-
     _depsLoaded = true;
     return true;
   } catch(e) {
@@ -1644,13 +1677,13 @@ async function openTerminal(ip, username, port, label) {
             if (m.role === 'user') {
               el.textContent = 'Q: ' + m.content;
             } else {
-              el.innerHTML = marked.parse(m.content);
+              el.innerHTML = escapeText(m.content);
             }
             assistantOut.appendChild(el);
           });
           assistantOut.scrollTo(0, assistantOut.scrollHeight);
         } else {
-          assistantOut.innerHTML = '<div style="color:var(--muted);text-align:center;padding-top:40px">Assistant ready for ' + label + '.</div>';
+          assistantOut.innerHTML = '<div style="color:var(--muted);text-align:center;padding-top:40px">Assistant ready for ' + escapeText(label) + '.</div>';
         }
       });
 
@@ -1659,7 +1692,7 @@ async function openTerminal(ip, username, port, label) {
     winObj.ws = ws;
 
     ws.onopen = () => {
-      ws.send(JSON.stringify({ ip, username, port, cols: winObj.term.cols, rows: winObj.term.rows }));
+      ws.send(JSON.stringify({ ip, cols: winObj.term.cols, rows: winObj.term.rows }));
       dot.className = 'term-dot connected';
       winObj.term.focus();
       updateTaskbar();
@@ -1724,10 +1757,13 @@ function updateTaskbar() {
     const win = _activeWindows[h];
     const isActive = win.el.classList.contains('active') && !win.el.classList.contains('minimized');
     const isClosed = win.ws && win.ws.readyState !== 1;
-    return '<div class="task-item' + (isActive ? ' active' : '') + '" onclick="restoreWindow(document.getElementById(\'win-' + h + '\'))">' +
+    return '<div class="task-item' + (isActive ? ' active' : '') + '" data-window="' + escapeText(h) + '">' +
       '<div class="task-dot" style="' + (isClosed ? 'background:var(--red);box-shadow:none' : '') + '"></div>' +
-      win.context.label + '</div>';
+      escapeText(win.context.label) + '</div>';
   }).join('');
+  for (const item of bar.querySelectorAll('[data-window]')) {
+    item.addEventListener('click', () => restoreWindow(_activeWindows[item.dataset.window].el));
+  }
 }
 
 // Simple Dragging
@@ -1779,50 +1815,50 @@ function cardHTML(d) {
   const icon       = OS_EMOJI[d.os_icon] || '💻';
 
   const latVal = d.latency != null
-    ? '<span class="m-val ' + latClass(d.latency) + '">' + d.latency + 'ms</span>'
+    ? '<span class="m-val ' + latClass(d.latency) + '">' + escapeText(d.latency) + 'ms</span>'
     : '<span class="m-val c-muted">' + (d.online ? '…' : '—') + '</span>';
 
   const conn      = d.is_self ? '—' : (d.direct ? 'direct ✓' : (d.relay || 'relay'));
   const connClass = d.direct ? 'c-green' : '';
 
   const rxTx = d.online
-    ? '<div class="metric"><div class="m-label">↓ Recv</div><span class="m-val">' + d.rx_bytes + '</span></div>' +
-      '<div class="metric"><div class="m-label">↑ Sent</div><span class="m-val">' + d.tx_bytes + '</span></div>'
-    : '<div class="metric"><div class="m-label">Last Seen</div><span class="m-val c-muted">' + (d.last_seen||'—') + '</span></div>' +
-      '<div class="metric"><div class="m-label">Handshake</div><span class="m-val c-muted">' + (d.last_handshake||'—') + '</span></div>';
+    ? '<div class="metric"><div class="m-label">↓ Recv</div><span class="m-val">' + escapeText(d.rx_bytes) + '</span></div>' +
+      '<div class="metric"><div class="m-label">↑ Sent</div><span class="m-val">' + escapeText(d.tx_bytes) + '</span></div>'
+    : '<div class="metric"><div class="m-label">Last Seen</div><span class="m-val c-muted">' + escapeText((d.last_seen||'—')) + '</span></div>' +
+      '<div class="metric"><div class="m-label">Handshake</div><span class="m-val c-muted">' + escapeText((d.last_handshake||'—')) + '</span></div>';
 
   let actions = '';
   if (d.has_ssh) {
     const dis = !d.online ? ' disabled' : '';
     actions += '<button class="act-btn term-btn"' + dis +
-      ' data-ip="' + d.ip + '"' +
-      ' data-user="' + d.ssh_user + '"' +
-      ' data-port="' + (d.ssh_port || 22) + '"' +
-      ' data-label="' + d.label.replace(/"/g, '&quot;') + '"' +
+      ' data-ip="' + escapeText(d.ip) + '"' +
+      ' data-user="' + escapeText(d.ssh_user) + '"' +
+      ' data-port="' + escapeText((d.ssh_port || 22)) + '"' +
+      ' data-label="' + escapeText(d.label) + '"' +
       '>⌨ Terminal</button>';
   }
   if (d.has_power && d.online) {
-    const hn = d.hostname; const lbl = d.label.replace(/"/g, '&quot;');
-    actions += '<button class="act-btn power-btn" data-hostname="' + hn + '" data-action="restart" data-label="' + lbl + '">↺ Restart</button>';
-    actions += '<button class="act-btn power-btn shutdown-btn" data-hostname="' + hn + '" data-action="shutdown" data-label="' + lbl + '">⏻ Shutdown</button>';
+    const hn = d.hostname; const lbl = escapeText(d.label);
+    actions += '<button class="act-btn power-btn" data-hostname="' + escapeText(hn) + '" data-action="restart" data-label="' + lbl + '">↺ Restart</button>';
+    actions += '<button class="act-btn power-btn shutdown-btn" data-hostname="' + escapeText(hn) + '" data-action="shutdown" data-label="' + lbl + '">⏻ Shutdown</button>';
   }
   if (!d.online && d.mac && !d.is_self) {
-    actions += '<button class="act-btn wol-btn" data-hostname="' + d.hostname + '" data-label="' + d.label.replace(/"/g, '&quot;') + '">⚡ Wake</button>';
+    actions += '<button class="act-btn wol-btn" data-hostname="' + escapeText(d.hostname) + '" data-label="' + escapeText(d.label) + '">⚡ Wake</button>';
   }
   if (d.has_mirror && d.online) {
     actions += '<div style="font-size:0.68rem;color:var(--purple);padding:5px 2px;letter-spacing:0.03em">⬡ AI-controlled · ask the assistant</div>';
   }
 
-  return '<div class="card ' + stateClass + '" id="card-' + d.hostname + '" data-hash="' + cardHash(d) + '">' +
+  return '<div class="card ' + stateClass + '" id="card-' + escapeText(d.hostname) + '" data-hash="' + escapeText(cardHash(d)) + '">' +
     (d.is_self ? '<div class="self-tag">YOU</div>' : '') +
     '<div class="card-top"><div class="device-left"><div class="os-icon">' + icon + '</div><div>' +
-    '<div class="device-name">' + d.label + '</div>' +
-    '<div class="device-hostname">' + d.hostname + ' · ' + d.ip + '</div></div></div>' +
+    '<div class="device-name">' + escapeText(d.label) + '</div>' +
+    '<div class="device-hostname">' + escapeText(d.hostname) + ' · ' + escapeText(d.ip) + '</div></div></div>' +
     '<div class="status-pill ' + pillClass + '"><span class="dot"></span>' + pillText + '</div></div>' +
-    '<div class="specs">' + d.specs + '</div>' +
+    '<div class="specs">' + escapeText(d.specs) + '</div>' +
     '<div class="metrics">' +
       '<div class="metric"><div class="m-label">Latency</div>' + latVal + '</div>' +
-      '<div class="metric"><div class="m-label">Connection</div><span class="m-val ' + connClass + '">' + conn + '</span></div>' +
+      '<div class="metric"><div class="m-label">Connection</div><span class="m-val ' + connClass + '">' + escapeText(conn) + '</span></div>' +
       rxTx +
     '</div>' +
     (actions ? '<div class="card-actions">' + actions + '</div>' : '') +
@@ -1842,7 +1878,7 @@ async function refresh() {
   } catch(e) {
     // Only show error if grid is empty (first load)
     if (!grid.children.length || grid.querySelector('.loading')) {
-      grid.innerHTML = '<div class="loading" style="color:var(--red)">Fetch failed: ' + e.message + '</div>';
+      grid.innerHTML = '<div class="loading" style="color:var(--red)">Fetch failed: ' + escapeText(e.message) + '</div>';
     } else {
       document.getElementById('updated').innerHTML = '<span style="color:var(--red)">Update failed</span>';
     }
@@ -1888,7 +1924,7 @@ async function refresh() {
     });
   } catch(e) {
     if (!grid.children.length || grid.querySelector('.loading')) {
-      grid.innerHTML = '<div class="loading" style="color:var(--red)">Render error: ' + e.message + '<br><small>' + e.stack + '</small></div>';
+      grid.innerHTML = '<div class="loading" style="color:var(--red)">Render error: ' + escapeText(e.message) + '<br><small>' + escapeText(e.stack) + '</small></div>';
     }
   }
 }
@@ -2219,7 +2255,7 @@ function closeBrain() {
 
 async function askBrain(customPrompt = null, depth = 0) {
   if (depth > 5) {
-    appendBrainMsg('bot', '<span style="color:var(--red)">Error: Recursion limit reached. Stopping autonomous loop to save tokens.</span>');
+    appendBrainMsg('bot', 'Task limit reached.');
     return;
   }
   if (!await ensureDeps()) return;
@@ -2235,7 +2271,7 @@ async function askBrain(customPrompt = null, depth = 0) {
     fetch('/api/history/brain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: 'user', content: prompt }) });
   }
 
-  const botMsg = appendBrainMsg('bot', '<span class="guide-spinner"></span>Thinking...');
+  const botMsg = appendBrainMsg('bot', 'Thinking…');
   chat.scrollTo(0, chat.scrollHeight);
 
   try {
@@ -2268,6 +2304,7 @@ async function askBrain(customPrompt = null, depth = 0) {
 
     while ((match = runRegex.exec(d.response)) !== null) {
       const target = match[1], cmd = match[2].trim();
+      if (!window.confirm('Run this command on ' + target + '?\\n\\n' + cmd)) continue;
       tasks.push((async () => {
         const res = await fetch('/api/run', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2280,6 +2317,7 @@ async function askBrain(customPrompt = null, depth = 0) {
 
     while ((match = execRegex.exec(d.response)) !== null) {
       const cmd = match[1].trim();
+      if (!window.confirm('Run this command on the hub?\\n\\n' + cmd)) continue;
       tasks.push((async () => {
         const res = await fetch('/api/run', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2303,12 +2341,12 @@ async function askBrain(customPrompt = null, depth = 0) {
     let html = '';
     if (d.reasoning) {
       html += '<details class="reasoning-block"><summary>Reasoning Process</summary><div class="reasoning-content">' + 
-              marked.parse(d.reasoning) + '</div></details>';
+              escapeText(d.reasoning) + '</div></details>';
     }
-    html += marked.parse(d.response);
+    html += escapeText(d.response);
     botMsg.innerHTML = html;
   } catch (e) {
-    botMsg.innerHTML = '<span style="color:var(--red)">Brain Error: ' + e.message + '</span>';
+    botMsg.innerHTML = '<span style="color:var(--red)">Brain Error: ' + escapeText(e.message) + '</span>';
   }
   chat.scrollTo(0, chat.scrollHeight);
 }
@@ -2319,21 +2357,9 @@ function appendBrainMsg(role, content) {
   const el = document.createElement('div');
   el.className = 'brain-msg ' + (role === 'user' ? 'user' : 'bot');
   
-  if (role === 'user') {
-    el.textContent = content;
-  } else {
-    // If it's a simple loading message, just set it
-    if (content.includes('guide-spinner')) {
-      el.innerHTML = content;
-    } else if (typeof marked !== 'undefined') {
-      el.innerHTML = marked.parse(content);
-    } else {
-      // Fallback if marked is still loading
-      el.textContent = content;
-      el.style.whiteSpace = 'pre-wrap';
-    }
-  }
-  
+  el.textContent = content;
+  el.style.whiteSpace = 'pre-wrap';
+
   chat.appendChild(el);
   chat.scrollTo(0, chat.scrollHeight);
   return el;
@@ -2451,7 +2477,7 @@ function refreshGuideSelect() {
   const prev = sel.value;
   sel.innerHTML = _devices
     .filter(d => d.has_ssh && d.online)
-    .map(d => '<option value="' + d.hostname + '" data-os="' + d.os + '">' + d.label + ' (' + d.os + ')</option>')
+    .map(d => '<option value="' + escapeText(d.hostname) + '" data-os="' + escapeText(d.os) + '">' + escapeText(d.label) + ' (' + escapeText(d.os) + ')</option>')
     .join('');
   if (prev) sel.value = prev;
   // Update command preview when machine changes
@@ -2536,4 +2562,5 @@ function clearGuideOutput() {
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5555))
     print(f"\n  Tailnet Dashboard → http://localhost:{port}\n")
-    app.run(host="0.0.0.0", port=port, threaded=True, debug=False)
+    access_policy.validate_configuration()
+    app.run(host=access_policy.host, port=port, threaded=True, debug=False)
